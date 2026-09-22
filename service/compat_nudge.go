@@ -1,7 +1,7 @@
 package service
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -99,57 +99,77 @@ func nudgeChatBody(body []byte, assistantText string) ([]byte, error) {
 	return json.Marshal(chat)
 }
 
-func (p *Proxy) nudgePreambleIfNeeded(c *gin.Context, meta *ChatRequestMeta, em streamAdapter) *parsedUsage {
+func (p *Proxy) nudgePreambleIfNeeded(c *gin.Context, meta *ChatRequestMeta, em streamAdapter) (*parsedUsage, error) {
 	if p == nil || p.rotator == nil || c == nil || meta == nil || meta.Protocol != ProtocolResponses {
-		return nil
+		return nil, nil
 	}
 	text, ok := shouldNudgeAdapter(em)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	nudged, err := nudgeChatBody(meta.Body, text)
 	if err != nil {
 		global.CORE_LOG.Warn("preamble nudge encode failed", zap.Error(err))
-		return nil
+		return nil, nil
 	}
 	acc, err := p.rotator.NextFor(nil, meta.UpstreamModel)
 	if err != nil {
 		global.CORE_LOG.Warn("preamble nudge has no account", zap.Error(err))
-		return nil
+		return nil, nil
 	}
-	resp, err := p.doUpstream(c.Request.Context(), acc, "/v2/chat/completions", nudged)
+	nudgeCtx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+	resp, err := p.doUpstream(nudgeCtx, acc, "/v2/chat/completions", nudged)
 	if err != nil {
 		global.CORE_LOG.Warn("preamble nudge upstream failed", zap.Error(err))
-		return nil
+		return nil, nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
 		global.CORE_LOG.Warn("preamble nudge upstream status", zap.Int("status", resp.StatusCode))
-		return nil
+		return nil, nil
 	}
 	global.CORE_LOG.Info("continued a Codex turn that announced work but did not call tools")
-	usage, err := pipeChatSSEToAdapter(resp.Body, em)
+	watchdog := startStreamIdleWatchdog(nudgeCtx, cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
+	defer watchdog.stop()
+	usage, err := pipeChatSSEToAdapter(resp.Body, em, watchdog)
+	if err == context.Canceled && watchdog.timedOutNow() {
+		err = errStreamIdle
+	}
 	if err != nil {
 		global.CORE_LOG.Warn("preamble nudge stream failed", zap.Error(err))
 	}
-	return usage
+	return usage, err
 }
 
-func pipeChatSSEToAdapter(r io.Reader, em streamAdapter) (*parsedUsage, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+func pipeChatSSEToAdapter(r io.Reader, em streamAdapter, watchdog *streamIdleWatchdog) (*parsedUsage, error) {
+	decoder := newSSEDecoder(r)
 	var usage *parsedUsage
-	for scanner.Scan() {
-		done, chunk := parseChatSSELine(scanner.Text())
-		if done {
-			break
+	finishReason := ""
+	for {
+		event, err := decoder.next()
+		if err == io.EOF {
+			if !normalSSETermination(false, finishReason) {
+				return usage, errSSEMissingEnd
+			}
+			return usage, nil
 		}
-		if chunk == nil {
+		if err != nil {
+			return usage, err
+		}
+		watchdog.touch()
+		if event.Done {
+			return usage, nil
+		}
+		if event.FinishReason != "" {
+			finishReason = event.FinishReason
+			em.onFinishReason(finishReason)
+		}
+		if event.Chunk == nil {
 			continue
 		}
-		usage = mergeUsage(usage, extractUsage(chunk))
-		applyChunkToAdapter(em, chunk)
+		usage = mergeUsage(usage, extractUsage(event.Chunk))
+		applyChunkToAdapter(em, event.Chunk)
 	}
-	return usage, scanner.Err()
 }

@@ -26,6 +26,8 @@ start-on-login.vbs          # 适合放进 Windows 启动目录
    gateway:
      api-key: "sk-your-local-api-key"
      admin-key: "sk-your-admin-key"
+    # 上游 SSE 连续静默超过此时长则终止流；每收到数据都会重置。
+    stream-idle-timeout-seconds: 300
    ```
 
    - `api-key`：下游 AI 客户端访问 `/v1/*` 使用的 Key。
@@ -153,6 +155,7 @@ $env:GATEWAY_PASSWORDLESS = "true"
 - 对 Codex / Agent harness 的 system、developer、工具描述和历史上下文做出站清洗，降低上游策略误判；遇到 `11128` 会自动用更严格模式重试一次。
 - 多账号支持 sticky、least_used、round_robin；结合额度、失败冷却和实测 `usage.credit` 选择账号。
 - 上游 HTTP 连接复用、HTTP/2、长流式响应和 gzip 请求均已启用；流式响应不使用容易截断长回答的总超时。
+- SSE 流会检测正常结束标志、提前 EOF、解析错误和上游静默；异常时返回协议级失败事件，不会把截断内容伪装成成功。
 
 ## 配置原则
 

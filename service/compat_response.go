@@ -134,13 +134,19 @@ func encodeResponsesJSON(result *ChatResult) ([]byte, error) {
 	if result.FinishReason == "length" {
 		status = "incomplete"
 	}
+	var incompleteDetails any
+	if status == "incomplete" {
+		incompleteDetails = map[string]any{"reason": "max_output_tokens"}
+	}
 	resp := map[string]any{
-		"id":         id,
-		"object":     "response",
-		"created_at": result.Created,
-		"status":     status,
-		"model":      result.Model,
-		"output":     output,
+		"id":                 id,
+		"object":             "response",
+		"created_at":         result.Created,
+		"status":             status,
+		"model":              result.Model,
+		"output":             output,
+		"error":              nil,
+		"incomplete_details": incompleteDetails,
 		"usage": func() map[string]any {
 			usage := map[string]any{
 				"input_tokens":  result.Usage.PromptTokens,

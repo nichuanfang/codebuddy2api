@@ -1,22 +1,26 @@
 package config
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 type Gateway struct {
-	APIKey          string       `mapstructure:"api-key" json:"api-key" yaml:"api-key"`
-	AdminKey        string       `mapstructure:"admin-key" json:"admin-key" yaml:"admin-key"`
-	Upstream        string       `mapstructure:"upstream" json:"upstream" yaml:"upstream"`
-	Gzip            bool         `mapstructure:"gzip" json:"gzip" yaml:"gzip"`
-	Passthrough     bool         `mapstructure:"passthrough" json:"passthrough" yaml:"passthrough"`
-	InjectReasoning bool         `mapstructure:"inject-reasoning" json:"inject-reasoning" yaml:"inject-reasoning"`
-	TimeoutSeconds  int          `mapstructure:"timeout-seconds" json:"timeout-seconds" yaml:"timeout-seconds"`
-	MaxRetries      int          `mapstructure:"max-retries" json:"max-retries" yaml:"max-retries"`
-	Rotate          string       `mapstructure:"rotate" json:"rotate" yaml:"rotate"`
-	TrustEnvProxy   bool         `mapstructure:"trust-env-proxy" json:"trust-env-proxy" yaml:"trust-env-proxy"`
-	Capture         string       `mapstructure:"capture" json:"capture" yaml:"capture"`
-	Proxy           string       `mapstructure:"proxy" json:"proxy" yaml:"proxy"`
-	ModelAlias      []ModelAlias `mapstructure:"model-alias" json:"model-alias" yaml:"model-alias"`
-	FallbackModel   string       `mapstructure:"fallback-model" json:"fallback-model" yaml:"fallback-model"`
+	APIKey                   string       `mapstructure:"api-key" json:"api-key" yaml:"api-key"`
+	AdminKey                 string       `mapstructure:"admin-key" json:"admin-key" yaml:"admin-key"`
+	Upstream                 string       `mapstructure:"upstream" json:"upstream" yaml:"upstream"`
+	Gzip                     bool         `mapstructure:"gzip" json:"gzip" yaml:"gzip"`
+	Passthrough              bool         `mapstructure:"passthrough" json:"passthrough" yaml:"passthrough"`
+	InjectReasoning          bool         `mapstructure:"inject-reasoning" json:"inject-reasoning" yaml:"inject-reasoning"`
+	TimeoutSeconds           int          `mapstructure:"timeout-seconds" json:"timeout-seconds" yaml:"timeout-seconds"`
+	StreamIdleTimeoutSeconds int          `mapstructure:"stream-idle-timeout-seconds" json:"stream-idle-timeout-seconds" yaml:"stream-idle-timeout-seconds"`
+	MaxRetries               int          `mapstructure:"max-retries" json:"max-retries" yaml:"max-retries"`
+	Rotate                   string       `mapstructure:"rotate" json:"rotate" yaml:"rotate"`
+	TrustEnvProxy            bool         `mapstructure:"trust-env-proxy" json:"trust-env-proxy" yaml:"trust-env-proxy"`
+	Capture                  string       `mapstructure:"capture" json:"capture" yaml:"capture"`
+	Proxy                    string       `mapstructure:"proxy" json:"proxy" yaml:"proxy"`
+	ModelAlias               []ModelAlias `mapstructure:"model-alias" json:"model-alias" yaml:"model-alias"`
+	FallbackModel            string       `mapstructure:"fallback-model" json:"fallback-model" yaml:"fallback-model"`
 	// SanitizeMode 控制发往上游前的清洗力度：
 	//   ""/"harness"（默认）——覆盖全部常见触发面：客户端模板（system/developer）、
 	//                          harness 注入的 user 上下文、tool 定义，以及随会话累积的
@@ -64,6 +68,13 @@ func (g Gateway) Retries() int {
 		return 3
 	}
 	return g.MaxRetries
+}
+
+func (g Gateway) StreamIdleTimeout() time.Duration {
+	if g.StreamIdleTimeoutSeconds <= 0 {
+		return 300 * time.Second
+	}
+	return time.Duration(g.StreamIdleTimeoutSeconds) * time.Second
 }
 
 type CodeBuddy struct {

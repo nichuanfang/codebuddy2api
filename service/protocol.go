@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -59,25 +58,35 @@ func ensureID(existing, prefix string) string {
 }
 
 func collectSSE(r io.Reader, requestedModel string) (*ChatResult, error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	return collectSSEWithStart(r, requestedModel, time.Now())
+}
+
+func collectSSEWithStart(r io.Reader, requestedModel string, streamStart time.Time) (*ChatResult, error) {
 	result := &ChatResult{Created: time.Now().Unix(), Usage: &parsedUsage{}}
 	tools := map[int]*AggregatedToolCall{}
 	var content, reasoning strings.Builder
-	streamStart := time.Now()
 	var firstTokenMs int64
+	normalTermination := false
+	decoder := newSSEDecoder(r)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if firstTokenMs == 0 && lineHasGeneratedToken(line) {
-			firstTokenMs = time.Since(streamStart).Milliseconds()
-		}
-		done, chunk := parseChatSSELine(line)
-		if done {
+	for {
+		event, err := decoder.next()
+		if err == io.EOF {
 			break
 		}
+		if err != nil {
+			return nil, err
+		}
+		if event.Done {
+			normalTermination = true
+			break
+		}
+		chunk := event.Chunk
 		if chunk == nil {
 			continue
+		}
+		if firstTokenMs == 0 && chunkHasGeneratedToken(chunk) {
+			firstTokenMs = time.Since(streamStart).Milliseconds()
 		}
 		if v, ok := chunk["id"].(string); ok && v != "" {
 			result.ID = v
@@ -89,14 +98,15 @@ func collectSSE(r io.Reader, requestedModel string) (*ChatResult, error) {
 			result.Created = int64(v)
 		}
 		result.Usage = mergeUsage(result.Usage, extractUsage(chunk))
+		if event.FinishReason != "" {
+			result.FinishReason = event.FinishReason
+			normalTermination = true
+		}
 		choices, _ := chunk["choices"].([]any)
 		for _, item := range choices {
 			choice, _ := item.(map[string]any)
 			if choice == nil {
 				continue
-			}
-			if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
-				result.FinishReason = fr
 			}
 			delta, _ := choice["delta"].(map[string]any)
 			if delta == nil {
@@ -112,8 +122,8 @@ func collectSSE(r io.Reader, requestedModel string) (*ChatResult, error) {
 			mergeToolCallDeltas(tools, delta["tool_calls"])
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	if !normalTermination {
+		return nil, errSSEMissingEnd
 	}
 	if requestedModel != "" {
 		result.Model = requestedModel
@@ -139,10 +149,11 @@ func collectSSE(r io.Reader, requestedModel string) (*ChatResult, error) {
 }
 
 func parseChatSSELine(line string) (bool, map[string]any) {
-	if !strings.HasPrefix(line, "data: ") {
+	data := strings.TrimSpace(line)
+	if !strings.HasPrefix(data, "data:") {
 		return false, nil
 	}
-	data := strings.TrimPrefix(line, "data: ")
+	data = strings.TrimSpace(strings.TrimPrefix(data, "data:"))
 	if data == "[DONE]" {
 		return true, nil
 	}

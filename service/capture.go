@@ -202,18 +202,12 @@ func clipText(s string, limit int) string {
 
 // chunkText 从上游 SSE 行里抽出可读文本，用于 dashboard 回看响应。
 func chunkText(line string) string {
-	if line == "" {
-		return ""
-	}
-	if !strings.HasPrefix(line, "data: ") {
-		return ""
-	}
-	data := strings.TrimPrefix(line, "data: ")
-	if data == "[DONE]" {
-		return ""
-	}
-	var chunk map[string]any
-	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+	_, chunk := parseChatSSELine(line)
+	return chunkTextFromChunk(chunk)
+}
+
+func chunkTextFromChunk(chunk map[string]any) string {
+	if chunk == nil {
 		return ""
 	}
 	var out strings.Builder

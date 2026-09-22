@@ -2,7 +2,6 @@ package service
 
 import (
 	"encoding/json"
-	"strings"
 )
 
 type parsedUsage struct {
@@ -136,38 +135,8 @@ func deriveMetrics(u *parsedUsage, latencyMs int64) {
 }
 
 func lineHasGeneratedToken(line string) bool {
-	if !strings.HasPrefix(line, "data: ") {
-		return false
-	}
-	data := strings.TrimPrefix(line, "data: ")
-	if data == "[DONE]" {
-		return false
-	}
-	var chunk map[string]any
-	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-		return false
-	}
-	choices, _ := chunk["choices"].([]any)
-	for _, item := range choices {
-		choice, _ := item.(map[string]any)
-		if choice == nil {
-			continue
-		}
-		delta, _ := choice["delta"].(map[string]any)
-		if delta == nil {
-			continue
-		}
-		if s, ok := delta["content"].(string); ok && s != "" {
-			return true
-		}
-		if s, ok := delta["reasoning_content"].(string); ok && s != "" {
-			return true
-		}
-		if tcs, ok := delta["tool_calls"].([]any); ok && len(tcs) > 0 {
-			return true
-		}
-	}
-	return false
+	_, chunk := parseChatSSELine(line)
+	return chunkHasGeneratedToken(chunk)
 }
 
 func asInt(v any) int {

@@ -10,6 +10,8 @@ gateway:
     passthrough: true
     inject-reasoning: false
     timeout-seconds: 300
+    # 上游 SSE 连续静默超过此时长则判定为断流；每收到数据都会重置。
+    stream-idle-timeout-seconds: 300
     max-retries: 3
     # 选号模式：sticky（同模型粘号）/ least_used / round_robin。
     # 无论哪种模式，都会先按「实测成本」过滤候选——优先挑跑该模型不花钱的号。

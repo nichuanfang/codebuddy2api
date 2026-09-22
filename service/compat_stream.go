@@ -1,12 +1,15 @@
 package service
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"codebuddy-gateway/global"
@@ -24,6 +27,7 @@ type streamAdapter interface {
 	onToolCall(tc AggregatedToolCall)
 	onFinishReason(s string)
 	finish() error
+	fail(error) error
 }
 
 type toolStreamState struct {
@@ -34,6 +38,7 @@ type toolStreamState struct {
 	name        string
 	args        string
 	opened      bool
+	closed      bool
 }
 
 func newStreamAdapter(proto Protocol, w io.Writer, flusher http.Flusher, model string) streamAdapter {
@@ -122,27 +127,36 @@ func applyChunkToAdapter(em streamAdapter, chunk map[string]any) {
 	}
 }
 
+type responseSegment struct {
+	index int
+	id    string
+	text  string
+}
+
 type responsesAdapter struct {
-	w               io.Writer
-	flusher         http.Flusher
-	err             error
-	id              string
-	model           string
-	created         int64
-	seq             int
-	out             int
-	reasoningOpen   bool
-	reasoningIdx    int
-	reasoningItemID string
-	reasoning       bytes.Buffer
-	textOpen        bool
-	textIdx         int
-	textItemID      string
-	text            bytes.Buffer
-	tools           map[int]*toolStreamState
-	toolOrder       []int
-	usage           *parsedUsage
-	finishReason    string
+	w                 io.Writer
+	flusher           http.Flusher
+	err               error
+	id                string
+	model             string
+	created           int64
+	seq               int
+	out               int
+	reasoningOpen     bool
+	reasoningIdx      int
+	reasoningItemID   string
+	reasoning         bytes.Buffer
+	reasoningSegments []responseSegment
+	textOpen          bool
+	textIdx           int
+	textItemID        string
+	text              bytes.Buffer
+	textSegments      []responseSegment
+	toolSegments      []*toolStreamState
+	tools             map[int]*toolStreamState
+	toolOrder         []int
+	usage             *parsedUsage
+	finishReason      string
 }
 
 func (a *responsesAdapter) emit(typ string, payload map[string]any) {
@@ -187,6 +201,7 @@ func (a *responsesAdapter) onReasoning(s string) {
 		return
 	}
 	if !a.reasoningOpen {
+		a.reasoning.Reset()
 		a.reasoningItemID = newID("rs_")
 		a.reasoningIdx = a.out
 		a.out++
@@ -242,6 +257,7 @@ func (a *responsesAdapter) closeReasoning() {
 			},
 		},
 	})
+	a.reasoningSegments = append(a.reasoningSegments, responseSegment{index: a.reasoningIdx, id: a.reasoningItemID, text: text})
 	a.reasoningOpen = false
 }
 
@@ -289,6 +305,7 @@ func (a *responsesAdapter) closeText() {
 			},
 		},
 	})
+	a.textSegments = append(a.textSegments, responseSegment{index: a.textIdx, id: a.textItemID, text: text})
 	a.textOpen = false
 }
 
@@ -399,12 +416,14 @@ func (a *responsesAdapter) emitCustomToolCall(st *toolStreamState) {
 			"input":   input,
 		},
 	})
+	a.toolSegments = append(a.toolSegments, cloneToolState(st))
+	st.closed = true
 }
 
 func (a *responsesAdapter) closeTools() {
 	for _, idx := range a.toolOrder {
 		st := a.tools[idx]
-		if st == nil {
+		if st == nil || st.closed {
 			continue
 		}
 		if isFreeformTool(st.name) {
@@ -441,6 +460,8 @@ func (a *responsesAdapter) closeTools() {
 			},
 		})
 		st.opened = false
+		st.closed = true
+		a.toolSegments = append(a.toolSegments, cloneToolState(st))
 	}
 }
 
@@ -454,10 +475,12 @@ func (a *responsesAdapter) finish() error {
 	}
 	a.closeTools()
 	status := "completed"
+	eventType := "response.completed"
 	if a.finishReason == "length" {
 		status = "incomplete"
+		eventType = "response.incomplete"
 	}
-	a.emit("response.completed", map[string]any{"response": a.full(status)})
+	a.emit(eventType, map[string]any{"response": a.full(status)})
 	return a.err
 }
 
@@ -465,6 +488,7 @@ func (a *responsesAdapter) ensureTextItem() {
 	if a.textOpen {
 		return
 	}
+	a.text.Reset()
 	a.textItemID = newID("msg_")
 	a.textIdx = a.out
 	a.out++
@@ -500,77 +524,86 @@ func (a *responsesAdapter) skeleton(status string) map[string]any {
 	}
 }
 
+func cloneToolState(st *toolStreamState) *toolStreamState {
+	if st == nil {
+		return nil
+	}
+	cp := *st
+	return &cp
+}
+
 func (a *responsesAdapter) full(status string) map[string]any {
-	output := make([]any, 0, 2+len(a.toolOrder))
-	if a.reasoning.Len() > 0 {
-		output = append(output, map[string]any{
-			"id":   a.reasoningItemID,
-			"type": "reasoning",
-			"summary": []any{
-				map[string]any{"type": "summary_text", "text": a.reasoning.String()},
-			},
-		})
+	type outputEntry struct {
+		index int
+		item  map[string]any
 	}
-	if a.text.Len() > 0 || len(a.toolOrder) == 0 {
-		itemID := a.textItemID
-		if itemID == "" {
-			itemID = newID("msg_")
-		}
-		output = append(output, map[string]any{
-			"id":     itemID,
-			"type":   "message",
-			"status": "completed",
-			"role":   "assistant",
-			"content": []any{
-				map[string]any{"type": "output_text", "text": a.text.String()},
+	entries := make([]outputEntry, 0, len(a.reasoningSegments)+len(a.textSegments)+len(a.toolSegments))
+	for _, segment := range a.reasoningSegments {
+		entries = append(entries, outputEntry{index: segment.index, item: map[string]any{
+			"id": segment.id, "type": "reasoning", "summary": []any{
+				map[string]any{"type": "summary_text", "text": segment.text},
 			},
-		})
+		}})
 	}
-	for _, idx := range a.toolOrder {
-		st := a.tools[idx]
+	for _, segment := range a.textSegments {
+		entries = append(entries, outputEntry{index: segment.index, item: map[string]any{
+			"id": segment.id, "type": "message", "status": "completed", "role": "assistant",
+			"content": []any{map[string]any{"type": "output_text", "text": segment.text}},
+		}})
+	}
+	for _, st := range a.toolSegments {
 		if st == nil {
 			continue
 		}
 		if isFreeformTool(st.name) {
-			output = append(output, map[string]any{
-				"id":      st.itemID,
-				"type":    "custom_tool_call",
-				"status":  "completed",
-				"call_id": st.callID,
-				"name":    st.name,
-				"input":   unwrapFreeformArgs(st.args),
-			})
-			continue
+			entries = append(entries, outputEntry{index: st.outputIndex, item: map[string]any{
+				"id": st.itemID, "type": "custom_tool_call", "status": "completed", "call_id": st.callID,
+				"name": st.name, "input": unwrapFreeformArgs(st.args),
+			}})
+		} else {
+			entries = append(entries, outputEntry{index: st.outputIndex, item: map[string]any{
+				"id": st.itemID, "type": "function_call", "status": "completed", "call_id": st.callID,
+				"name": st.name, "arguments": st.args,
+			}})
 		}
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].index < entries[j].index })
+	output := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		output = append(output, entry.item)
+	}
+	if len(output) == 0 {
 		output = append(output, map[string]any{
-			"id":        st.itemID,
-			"type":      "function_call",
-			"status":    "completed",
-			"call_id":   st.callID,
-			"name":      st.name,
-			"arguments": st.args,
+			"id": newID("msg_"), "type": "message", "status": "completed", "role": "assistant",
+			"content": []any{map[string]any{"type": "output_text", "text": ""}},
 		})
 	}
-	usage := map[string]any{
-		"input_tokens":  0,
-		"output_tokens": 0,
-		"total_tokens":  0,
-	}
+	usage := map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 	if a.usage != nil {
 		usage["input_tokens"] = a.usage.PromptTokens
 		usage["output_tokens"] = a.usage.CompletionTokens
 		usage["total_tokens"] = a.usage.TotalTokens
 	}
 	attachResponsesCacheUsage(usage, a.usage)
-	return map[string]any{
-		"id":         a.id,
-		"object":     "response",
-		"created_at": a.created,
-		"status":     status,
-		"model":      a.model,
-		"output":     output,
-		"usage":      usage,
+	var incomplete any
+	if status == "incomplete" {
+		incomplete = map[string]any{"reason": "max_output_tokens"}
 	}
+	return map[string]any{
+		"id": a.id, "object": "response", "created_at": a.created, "status": status,
+		"model": a.model, "output": output, "usage": usage, "error": nil,
+		"incomplete_details": incomplete,
+	}
+}
+
+func (a *responsesAdapter) fail(err error) error {
+	a.closeReasoning()
+	a.closeText()
+	a.closeTools()
+	response := a.full("failed")
+	response["error"] = map[string]any{"code": "upstream_stream_error", "message": err.Error()}
+	a.emit("response.failed", map[string]any{"response": response})
+	return a.err
 }
 
 type anthropicAdapter struct {
@@ -795,14 +828,34 @@ func (a *anthropicAdapter) finish() error {
 	return a.err
 }
 
-func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatRequestMeta) (*parsedUsage, error) {
-	result, err := collectSSE(resp.Body, meta.RequestedModel)
+func (a *anthropicAdapter) fail(err error) error {
+	a.closeThinking()
+	a.closeText()
+	a.closeTools()
+	a.emit("error", map[string]any{"error": map[string]any{"type": "api_error", "message": err.Error()}})
+	a.emit("message_stop", map[string]any{})
+	return a.err
+}
+
+func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
+	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
+	defer watchdog.stop()
+	result, err := collectSSEWithStart(resp.Body, meta.RequestedModel, start)
 	if err != nil {
-		return nil, err
+		if watchdog != nil && watchdog.timedOutNow() {
+			return nil, errors.Join(errUpstreamStream, errStreamIdle, err)
+		}
+		if c.Request.Context().Err() != nil {
+			return nil, wrapDownstreamWrite(c.Request.Context().Err())
+		}
+		return nil, wrapUpstreamStream(err)
 	}
 	if result.Usage != nil && result.Usage.RequestID == "" {
 		result.Usage.RequestID = resp.Header.Get("X-Request-Id")
 	}
+	collector := NewCaptureCollector()
+	collector.Write(jsonResponseText(result))
+	result.Usage.Collector = collector
 	var encoded []byte
 	switch meta.Protocol {
 	case ProtocolAnthropic:
@@ -816,11 +869,13 @@ func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatR
 	}
 	c.Header("Content-Type", "application/json")
 	c.Status(http.StatusOK)
-	_, writeErr := c.Writer.Write(stripInvisibleFromFrame(encoded))
-	return result.Usage, writeErr
+	if _, writeErr := c.Writer.Write(stripInvisibleFromFrame(encoded)); writeErr != nil {
+		return result.Usage, wrapDownstreamWrite(writeErr)
+	}
+	return result.Usage, nil
 }
 
-func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *ChatRequestMeta) (*parsedUsage, error) {
+func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -832,52 +887,75 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 	flusher, _ := c.Writer.(http.Flusher)
 	sink := newSSESink(c.Writer, flusher)
 
-	em := newStreamAdapter(meta.Protocol, sink, sink, meta.RequestedModel)
+	// sseSink flushes exactly once per write; passing nil avoids a second flush
+	// from writeSSEEvent.
+	em := newStreamAdapter(meta.Protocol, sink, nil, meta.RequestedModel)
 	em.start()
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	streamStart := time.Now()
+	decoder := newSSEDecoder(resp.Body)
 	var usage *parsedUsage
 	var firstTokenMs int64
+	var finishReason string
+	collector := NewCaptureCollector()
 	reqID := resp.Header.Get("X-Request-Id")
-
-	// 上游思考期间可能长时间不吐字。心跳必须是 SSE 事件（不是 ": ping" 注释），
-	// 否则 Codex 的 eventsource idle timeout 仍会把会话掐掉。
+	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
+	defer watchdog.stop()
 	stopHeartbeat := startSSEHeartbeat(sink)
 	defer stopHeartbeat()
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if firstTokenMs == 0 && lineHasGeneratedToken(line) {
-			firstTokenMs = time.Since(streamStart).Milliseconds()
-		}
-		done, chunk := parseChatSSELine(line)
-		if done {
+	for {
+		event, err := decoder.next()
+		if err == io.EOF {
+			if !normalSSETermination(false, finishReason) {
+				failure := wrapUpstreamStream(errSSEMissingEnd)
+				em.setUsage(usageWithStreamMeta(usage, collector, firstTokenMs, reqID))
+				_ = em.fail(failure)
+				return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
+			}
 			break
 		}
-		if chunk == nil {
+		if err != nil {
+			failure := streamReadError(err, watchdog, c.Request.Context())
+			em.setUsage(usageWithStreamMeta(usage, collector, firstTokenMs, reqID))
+			_ = em.fail(failure)
+			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
+		}
+		watchdog.touch()
+		if event.Done {
+			break
+		}
+		if event.FinishReason != "" {
+			finishReason = event.FinishReason
+		}
+		if firstTokenMs == 0 && chunkHasGeneratedToken(event.Chunk) {
+			firstTokenMs = time.Since(start).Milliseconds()
+		}
+		if event.Chunk == nil {
 			continue
 		}
-		usage = mergeUsage(usage, extractUsage(chunk))
-		applyChunkToAdapter(em, chunk)
+		parsed := extractUsage(event.Chunk)
+		if parsed == nil {
+			parsed = &parsedUsage{}
+		}
+		parsed.Collector = collector
+		collector.Write(chunkTextFromChunk(event.Chunk))
+		usage = mergeUsage(usage, parsed)
+		applyChunkToAdapter(em, event.Chunk)
 	}
-	if usage == nil {
-		usage = &parsedUsage{}
-	}
-	usage.FirstTokenMs = firstTokenMs
-	if reqID != "" && usage.RequestID == "" {
-		usage.RequestID = reqID
-	}
-	if err := scanner.Err(); err != nil {
-		em.setUsage(usage)
-		_ = em.finish()
-		return usage, err
-	}
-	if extra := p.nudgePreambleIfNeeded(c, meta, em); extra != nil {
+
+	if extra, nudgeErr := p.nudgePreambleIfNeeded(c, meta, em); nudgeErr != nil {
+		failure := wrapUpstreamStream(nudgeErr)
+		em.setUsage(usageWithStreamMeta(usage, collector, firstTokenMs, reqID))
+		_ = em.fail(failure)
+		return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
+	} else if extra != nil {
 		usage = mergeUsage(usage, extra)
 	}
+	usage = usageWithStreamMeta(usage, collector, firstTokenMs, reqID)
 	em.setUsage(usage)
+	if finishReason != "" {
+		em.onFinishReason(finishReason)
+	}
 	return usage, em.finish()
 }
 
@@ -889,13 +967,16 @@ const sseHeartbeatInterval = 15 * time.Second
 // 心跳 goroutine 和主循环会同时写同一个 ResponseWriter，不锁就会把 event/data 帧撕开，
 // 客户端（Codex）表现为「写着写着突然断了 / Conversation interrupted」。
 type sseSink struct {
-	mu      sync.Mutex
-	w       io.Writer
-	flusher http.Flusher
+	mu        sync.Mutex
+	w         io.Writer
+	flusher   http.Flusher
+	lastWrite atomic.Int64
 }
 
 func newSSESink(w io.Writer, flusher http.Flusher) *sseSink {
-	return &sseSink{w: w, flusher: flusher}
+	s := &sseSink{w: w, flusher: flusher}
+	s.lastWrite.Store(time.Now().UnixNano())
+	return s
 }
 
 func (s *sseSink) Write(p []byte) (int, error) {
@@ -904,14 +985,13 @@ func (s *sseSink) Write(p []byte) (int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// 出站统一剥掉脱敏用的不可见标记，避免零宽随代码泄漏进用户工程。
 	clean := stripInvisibleFromFrame(p)
 	n, err := s.w.Write(clean)
 	if err == nil && s.flusher != nil {
 		s.flusher.Flush()
 	}
-	// 返回原始长度：调用方关心的是「它给的字节被接受了」，而不是清理后的长度。
 	if err == nil && n == len(clean) {
+		s.lastWrite.Store(time.Now().UnixNano())
 		return len(p), nil
 	}
 	return n, err
@@ -928,24 +1008,22 @@ func (s *sseSink) Flush() {
 	}
 }
 
+func (s *sseSink) LastWrite() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	return time.Unix(0, s.lastWrite.Load())
+}
+
 // invisibleByteSeqs 是不可见标记的 UTF-8 字节序列，与 sanitize.go 的
 // invisibleMarks 一一对应（那里处理 string，这里处理出站字节）。
 var invisibleByteSeqs = [][]byte{
-	{0xe2, 0x80, 0x8b}, // U+200B 零宽空格（脱敏标记）
-	{0xe2, 0x80, 0x8c}, // U+200C 零宽非连接符
-	{0xe2, 0x80, 0x8d}, // U+200D 零宽连接符
-	{0xef, 0xbb, 0xbf}, // U+FEFF 零宽不换行空格 / BOM
+	{0xe2, 0x80, 0x8b},
+	{0xe2, 0x80, 0x8c},
+	{0xe2, 0x80, 0x8d},
+	{0xef, 0xbb, 0xbf},
 }
 
-// stripInvisibleFromFrame 在出站前剥掉不可见标记。
-//
-// 为什么必须做：入站脱敏靠往词里插零宽来打断上游的子串匹配，但模型读到的是
-// "s<ZWSP>andbox"。一旦它在回答或工具入参里复述这段文本，零宽就会随代码写进
-// 用户的源文件——肉眼完全看不出来，可 diff 会显示「有改动」、字符串比较会失败、
-// 正则匹配会漏。属于最难排查的一类问题，所以出站统一兜掉。
-//
-// 字节级替换是安全的：零宽总位于 JSON 字符串内容之内，而 SSE 帧是整帧写入的，
-// 不存在 3 字节序列被切到两帧的情况。
 func stripInvisibleFromFrame(p []byte) []byte {
 	if len(p) == 0 {
 		return p
@@ -959,16 +1037,12 @@ func stripInvisibleFromFrame(p []byte) []byte {
 	return out
 }
 
-// sseHeartbeatFrame 必须是完整 SSE 事件，不能用注释帧 ": ping"。
-// Codex Responses 客户端用 eventsource 解析后再做 idle timeout：
-// timeout(stream_idle_timeout, stream.next())。注释会被 parser 丢掉，
-// 应用层永远等不到事件，于是报 "idle timeout waiting for SSE"，TUI 显示 Conversation interrupted。
-// {"type":"ping"} 能被解析，随后作为 unhandled event 忽略，从而重置空闲计时；
-// 同时也能喂饱中间代理的 TCP/HTTP 空闲超时。
 const sseHeartbeatFrame = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
 
-// startSSEHeartbeat 在上游静默期间持续发送 SSE ping 事件。
-// 返回的 stop 函数会在结束后停止心跳并排空 goroutine。
+type sseActivitySource interface {
+	LastWrite() time.Time
+}
+
 func startSSEHeartbeat(w io.Writer) func() {
 	return startSSEHeartbeatInterval(w, sseHeartbeatInterval)
 }
@@ -978,8 +1052,10 @@ func startSSEHeartbeatInterval(w io.Writer, interval time.Duration) func() {
 		interval = sseHeartbeatInterval
 	}
 	done := make(chan struct{})
+	finished := make(chan struct{})
 	var once sync.Once
 	go func() {
+		defer close(finished)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -987,6 +1063,12 @@ func startSSEHeartbeatInterval(w io.Writer, interval time.Duration) func() {
 			case <-done:
 				return
 			case <-ticker.C:
+				if source, ok := w.(sseActivitySource); ok {
+					last := source.LastWrite()
+					if !last.IsZero() && time.Since(last) < interval {
+						continue
+					}
+				}
 				if _, err := io.WriteString(w, sseHeartbeatFrame); err != nil {
 					return
 				}
@@ -995,5 +1077,6 @@ func startSSEHeartbeatInterval(w io.Writer, interval time.Duration) func() {
 	}()
 	return func() {
 		once.Do(func() { close(done) })
+		<-finished
 	}
 }

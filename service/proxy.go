@@ -1,9 +1,9 @@
 package service
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +16,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
+
+var errRequestBodyTooLarge = errors.New("request body exceeds 32 MiB")
 
 type Proxy struct {
 	client    *UpstreamClient
@@ -78,9 +80,13 @@ func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
 }
 
 func (p *Proxy) HandleChat(c *gin.Context) {
-	raw, err := io.ReadAll(c.Request.Body)
+	raw, err := readRequestBody(c)
 	if err != nil {
-		gatewayError(c, ProtocolChat, http.StatusBadRequest, "invalid request body")
+		status := http.StatusBadRequest
+		if errors.Is(err, errRequestBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		gatewayError(c, ProtocolChat, status, err.Error())
 		return
 	}
 	meta, err := PrepareChatBody(raw)
@@ -93,9 +99,13 @@ func (p *Proxy) HandleChat(c *gin.Context) {
 }
 
 func (p *Proxy) HandleResponses(c *gin.Context) {
-	raw, err := io.ReadAll(c.Request.Body)
+	raw, err := readRequestBody(c)
 	if err != nil {
-		gatewayError(c, ProtocolResponses, http.StatusBadRequest, "invalid request body")
+		status := http.StatusBadRequest
+		if errors.Is(err, errRequestBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		gatewayError(c, ProtocolResponses, status, err.Error())
 		return
 	}
 	meta, err := PrepareResponsesBody(raw)
@@ -108,9 +118,13 @@ func (p *Proxy) HandleResponses(c *gin.Context) {
 }
 
 func (p *Proxy) HandleMessages(c *gin.Context) {
-	raw, err := io.ReadAll(c.Request.Body)
+	raw, err := readRequestBody(c)
 	if err != nil {
-		gatewayError(c, ProtocolAnthropic, http.StatusBadRequest, "invalid request body")
+		status := http.StatusBadRequest
+		if errors.Is(err, errRequestBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		gatewayError(c, ProtocolAnthropic, status, err.Error())
 		return
 	}
 	meta, err := PrepareAnthropicBody(raw)
@@ -123,9 +137,13 @@ func (p *Proxy) HandleMessages(c *gin.Context) {
 }
 
 func (p *Proxy) HandleCountTokens(c *gin.Context) {
-	raw, err := io.ReadAll(c.Request.Body)
+	raw, err := readRequestBody(c)
 	if err != nil {
-		gatewayError(c, ProtocolAnthropic, http.StatusBadRequest, "invalid request body")
+		status := http.StatusBadRequest
+		if errors.Is(err, errRequestBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		gatewayError(c, ProtocolAnthropic, status, err.Error())
 		return
 	}
 	c.Header("anthropic-version", "2023-06-01")
@@ -133,9 +151,13 @@ func (p *Proxy) HandleCountTokens(c *gin.Context) {
 }
 
 func (p *Proxy) HandleCompletions(c *gin.Context) {
-	raw, err := io.ReadAll(c.Request.Body)
+	raw, err := readRequestBody(c)
 	if err != nil {
-		openaiError(c, http.StatusBadRequest, "invalid request body")
+		status := http.StatusBadRequest
+		if errors.Is(err, errRequestBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		openaiError(c, status, err.Error())
 		return
 	}
 	var body map[string]any
@@ -178,8 +200,6 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	exclude := map[uint]struct{}{}
 	retries := global.CORE_CONFIG.Gateway.Retries()
 	var lastErr string
-	// wafRetried：11128 被安全策略拒绝后，我们已经把请求体换成更干净的版本重发过一次。
-	// 只做一轮：换账号对 11128 无效（日志已证明换遍全池仍被拦），能救的只有改请求内容。
 	wafRetried := false
 
 	for i := 0; i < retries; i++ {
@@ -196,7 +216,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			}
 		}
 
-		resp, err := p.doUpstream(c.Request.Context(), acc, path, meta.Body)
+		resp, cancel, err := p.doUpstreamAttempt(c.Request.Context(), acc, path, meta.Body)
 		if err != nil {
 			lastErr = err.Error()
 			p.rotator.MarkFailure(acc, lastErr)
@@ -206,12 +226,13 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 		if resp.StatusCode == http.StatusUnauthorized {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
+			cancel()
 			if refreshErr := p.refresher.RefreshAccount(c.Request.Context(), acc); refreshErr != nil {
 				lastErr = "jwt invalid and refresh failed: " + refreshErr.Error()
 				p.rotator.MarkFailure(acc, lastErr)
 				continue
 			}
-			resp, err = p.doUpstream(c.Request.Context(), acc, path, meta.Body)
+			resp, cancel, err = p.doUpstreamAttempt(c.Request.Context(), acc, path, meta.Body)
 			if err != nil {
 				lastErr = err.Error()
 				p.rotator.MarkFailure(acc, lastErr)
@@ -222,6 +243,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
 			raw, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			cancel()
 			lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
 			if isModelQuotaExhausted(resp.StatusCode, raw) {
 				p.rotator.MarkModelExhausted(acc, meta.UpstreamModel, lastErr)
@@ -234,23 +256,25 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 		if resp.StatusCode != http.StatusOK {
 			raw, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			cancel()
 			lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
 			if isUpstreamModelUnavailable(raw) && maybeRewriteUnavailableModel(meta) {
 				global.CORE_LOG.Warn("upstream model unavailable, retrying same account with fallback",
 					zap.Uint("account_id", acc.ID),
 					zap.String("error", lastErr),
 					zap.String("fallback", meta.UpstreamModel))
-				resp, err = p.doUpstream(c.Request.Context(), acc, path, meta.Body)
+				resp, cancel, err = p.doUpstreamAttempt(c.Request.Context(), acc, path, meta.Body)
 				if err != nil {
 					lastErr = err.Error()
 					continue
 				}
 				if resp.StatusCode == http.StatusOK {
-					p.commitSuccess(c, acc, resp, meta, start)
+					p.commitSuccess(c, acc, resp, cancel, meta, start)
 					return
 				}
 				raw, _ = io.ReadAll(resp.Body)
 				resp.Body.Close()
+				cancel()
 				lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
 			}
 			if isModelQuotaExhausted(resp.StatusCode, raw) {
@@ -258,14 +282,10 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 				continue
 			}
 			if isUnapprovedChannel(raw) && !wafRetried {
-				// 安全策略拦的是「请求内容」，不是账号：换账号重试只会把整池烧一遍
-				// （线上日志实测：同一请求连续换 8 个账号，全部 11128）。
-				// 正确做法是就地降级——把 harness 注入的 user 消息也一并脱敏，重发一次。
 				wafRetried = true
 				global.CORE_LOG.Warn("upstream blocked by security policy, escalating sanitize and retrying",
 					zap.Uint("account_id", acc.ID), zap.String("error", lastErr))
 				if retryWAFRejectedBody(meta) {
-					// 不排除当前账号：账号本身没问题，换号解决不了内容问题。
 					delete(exclude, acc.ID)
 					i--
 					continue
@@ -289,7 +309,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			return
 		}
 
-		p.commitSuccess(c, acc, resp, meta, start)
+		p.commitSuccess(c, acc, resp, cancel, meta, start)
 		return
 	}
 
@@ -299,13 +319,40 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	gatewayError(c, meta.Protocol, http.StatusServiceUnavailable, lastErr)
 }
 
-func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Response, meta *ChatRequestMeta, start time.Time) {
-	p.rotator.MarkSuccessFor(acc, meta.UpstreamModel)
-	usage, writeErr := p.writeResponse(c, resp, meta)
+func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Response, cancel context.CancelFunc, meta *ChatRequestMeta, start time.Time) {
+	defer cancel()
+	usage, writeErr := p.writeResponse(c, resp, meta, start, cancel)
+	status := http.StatusOK
+	errMsg := ""
 	if writeErr != nil {
-		global.CORE_LOG.Warn("write upstream response failed", zap.Error(writeErr))
+		errMsg = writeErr.Error()
+		switch {
+		case errors.Is(writeErr, errDownstreamWrite):
+			status = 499
+		case errors.Is(writeErr, errUpstreamStream):
+			status = http.StatusBadGateway
+			p.rotator.MarkFailure(acc, errMsg)
+		default:
+			status = http.StatusInternalServerError
+		}
+		global.CORE_LOG.Warn("write upstream response failed", zap.Int("status", status), zap.Error(writeErr))
+		if !c.Writer.Written() {
+			gatewayError(c, meta.Protocol, status, errMsg)
+		}
+	} else {
+		p.rotator.MarkSuccessFor(acc, meta.UpstreamModel)
 	}
-	p.recordUsage(acc, meta, start, http.StatusOK, "", usage)
+	p.recordUsage(acc, meta, start, status, errMsg, usage)
+}
+
+func (p *Proxy) doUpstreamAttempt(parent context.Context, acc *model.Account, path string, body []byte) (*http.Response, context.CancelFunc, error) {
+	ctx, cancel := context.WithCancel(parent)
+	resp, err := p.doUpstream(ctx, acc, path, body)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return resp, cancel, nil
 }
 
 func (p *Proxy) doUpstream(ctx context.Context, acc *model.Account, path string, body []byte) (*http.Response, error) {
@@ -315,21 +362,21 @@ func (p *Proxy) doUpstream(ctx context.Context, acc *model.Account, path string,
 	return p.client.ChatCompletions(ctx, acc, body)
 }
 
-func (p *Proxy) writeResponse(c *gin.Context, resp *http.Response, meta *ChatRequestMeta) (*parsedUsage, error) {
+func (p *Proxy) writeResponse(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
 	defer resp.Body.Close()
 	if meta.Protocol == ProtocolResponses || meta.Protocol == ProtocolAnthropic {
 		if meta.ClientStream {
-			return p.writeCompatStream(c, resp, meta)
+			return p.writeCompatStream(c, resp, meta, start, cancel)
 		}
-		return p.writeCompatJSON(c, resp, meta)
+		return p.writeCompatJSON(c, resp, meta, start, cancel)
 	}
 	if meta.ClientStream {
-		return p.writeStream(c, resp, meta)
+		return p.writeStream(c, resp, meta, start, cancel)
 	}
-	return p.writeJSON(c, resp, meta)
+	return p.writeJSON(c, resp, meta, start, cancel)
 }
 
-func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatRequestMeta) (*parsedUsage, error) {
+func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -338,55 +385,79 @@ func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatReque
 	flusher, _ := c.Writer.(http.Flusher)
 	sink := newSSESink(c.Writer, flusher)
 
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	streamStart := time.Now()
+	decoder := newSSEDecoder(resp.Body)
 	var usage *parsedUsage
 	var firstTokenMs int64
+	finishReason := ""
+	doneSeen := false
 	collector := NewCaptureCollector()
 	reqID := resp.Header.Get("X-Request-Id")
-
-	// 上游静默期间补 SSE ping 事件，同时喂饱代理空闲超时和 Codex idle timeout。
+	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
+	defer watchdog.stop()
 	stopHeartbeat := startSSEHeartbeat(sink)
 	defer stopHeartbeat()
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if firstTokenMs == 0 && lineHasGeneratedToken(line) {
-			firstTokenMs = time.Since(streamStart).Milliseconds()
+	for {
+		event, err := decoder.next()
+		if err == io.EOF {
+			if !normalSSETermination(false, finishReason) {
+				failure := wrapUpstreamStream(errSSEMissingEnd)
+				return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failChatStream(sink, failure)
+			}
+			if !doneSeen {
+				if _, doneErr := io.WriteString(sink, "data: [DONE]\n\n"); doneErr != nil {
+					return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), wrapDownstreamWrite(doneErr)
+				}
+			}
+			break
 		}
-		out, parsed := rewriteSSELine(line, meta.RequestedModel)
+		if err != nil {
+			failure := streamReadError(err, watchdog, c.Request.Context())
+			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failChatStream(sink, failure)
+		}
+		watchdog.touch()
+		if event.Done {
+			doneSeen = true
+			break
+		}
+		if event.FinishReason != "" {
+			finishReason = event.FinishReason
+		}
+		if firstTokenMs == 0 && chunkHasGeneratedToken(event.Chunk) {
+			firstTokenMs = time.Since(start).Milliseconds()
+		}
+		out, parsed := rewriteSSEEvent(event, meta.RequestedModel)
+		if out == "" {
+			continue
+		}
 		if parsed == nil {
 			parsed = &parsedUsage{}
 		}
 		parsed.Collector = collector
-		collector.Write(chunkText(line))
+		collector.Write(chunkTextFromChunk(event.Chunk))
 		usage = mergeUsage(usage, parsed)
-		if _, err := io.WriteString(sink, out+"\n"); err != nil {
+		if _, err := io.WriteString(sink, out); err != nil {
 			if usage != nil {
 				usage.FirstTokenMs = firstTokenMs
 			}
-			return usage, err
+			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), wrapDownstreamWrite(err)
 		}
 	}
-	if usage == nil {
-		usage = &parsedUsage{}
-	}
-	usage.Collector = collector
-	usage.FirstTokenMs = firstTokenMs
-	if reqID != "" {
-		usage.RequestID = reqID
-	}
-	if err := scanner.Err(); err != nil {
-		return usage, err
-	}
-	return usage, nil
+	return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), nil
 }
 
-func (p *Proxy) writeJSON(c *gin.Context, resp *http.Response, meta *ChatRequestMeta) (*parsedUsage, error) {
-	result, err := collectSSE(resp.Body, meta.RequestedModel)
+func (p *Proxy) writeJSON(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
+	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
+	defer watchdog.stop()
+	result, err := collectSSEWithStart(resp.Body, meta.RequestedModel, start)
 	if err != nil {
-		return nil, err
+		if watchdog != nil && watchdog.timedOutNow() {
+			return nil, errors.Join(errUpstreamStream, errStreamIdle, err)
+		}
+		if c.Request.Context().Err() != nil {
+			return nil, wrapDownstreamWrite(c.Request.Context().Err())
+		}
+		return nil, wrapUpstreamStream(err)
 	}
 	if result.Usage == nil {
 		result.Usage = &parsedUsage{}
@@ -403,21 +474,56 @@ func (p *Proxy) writeJSON(c *gin.Context, resp *http.Response, meta *ChatRequest
 	}
 	c.Header("Content-Type", "application/json")
 	c.Status(http.StatusOK)
-	_, writeErr := c.Writer.Write(stripInvisibleFromFrame(agg))
-	return result.Usage, writeErr
+	if _, writeErr := c.Writer.Write(stripInvisibleFromFrame(agg)); writeErr != nil {
+		return result.Usage, wrapDownstreamWrite(writeErr)
+	}
+	return result.Usage, nil
 }
 
-func rewriteSSELine(line, requestedModel string) (string, *parsedUsage) {
-	if !strings.HasPrefix(line, "data: ") {
-		return line, nil
+func failChatStream(sink io.Writer, err error) error {
+	payload := map[string]any{"error": map[string]any{
+		"message": err.Error(),
+		"type":    "codebuddy_gateway_error",
+	}}
+	data, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return wrapUpstreamStream(marshalErr)
 	}
-	data := strings.TrimPrefix(line, "data: ")
-	if data == "[DONE]" {
-		return line, nil
+	if _, writeErr := io.WriteString(sink, "data: "+string(data)+"\n\n"); writeErr != nil {
+		return wrapDownstreamWrite(writeErr)
 	}
-	var chunk map[string]any
-	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-		return line, nil
+	if _, writeErr := io.WriteString(sink, "data: [DONE]\n\n"); writeErr != nil {
+		return wrapDownstreamWrite(writeErr)
+	}
+	return err
+}
+
+func usageWithStreamMeta(usage *parsedUsage, collector *CaptureCollector, firstTokenMs int64, reqID string) *parsedUsage {
+	if usage == nil {
+		usage = &parsedUsage{}
+	}
+	usage.Collector = collector
+	usage.FirstTokenMs = firstTokenMs
+	if reqID != "" && usage.RequestID == "" {
+		usage.RequestID = reqID
+	}
+	return usage
+}
+
+func normalSSETermination(done bool, finishReason string) bool {
+	return done || finishReason != ""
+}
+
+func rewriteSSEEvent(event *sseEvent, requestedModel string) (string, *parsedUsage) {
+	if event == nil {
+		return "", nil
+	}
+	if event.Done {
+		return "data: [DONE]\n\n", nil
+	}
+	chunk := event.Chunk
+	if chunk == nil {
+		return "", nil
 	}
 	if requestedModel != "" {
 		chunk["model"] = requestedModel
@@ -428,9 +534,22 @@ func rewriteSSELine(line, requestedModel string) (string, *parsedUsage) {
 	usage := extractUsage(chunk)
 	encoded, err := json.Marshal(chunk)
 	if err != nil {
+		return "", usage
+	}
+	return "data: " + string(encoded) + "\n\n", usage
+}
+
+func rewriteSSELine(line, requestedModel string) (string, *parsedUsage) {
+	done, chunk := parseChatSSELine(line)
+	event := &sseEvent{Done: done, Chunk: chunk}
+	if chunk != nil {
+		event.FinishReason = chunkFinishReason(chunk)
+	}
+	out, usage := rewriteSSEEvent(event, requestedModel)
+	if out == "" {
 		return line, usage
 	}
-	return "data: " + string(encoded), usage
+	return strings.TrimSuffix(out, "\n"), usage
 }
 
 func aggregateSSE(r io.Reader, requestedModel string) ([]byte, *parsedUsage, error) {
@@ -469,6 +588,20 @@ func stripNonOpenAI(chunk map[string]any) {
 	if usage, ok := chunk["usage"].(map[string]any); ok {
 		delete(usage, "credit")
 	}
+}
+
+const maxRequestBodyBytes = 32 << 20
+
+func readRequestBody(c *gin.Context) ([]byte, error) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		if strings.Contains(err.Error(), "request body too large") {
+			return nil, errRequestBodyTooLarge
+		}
+		return nil, err
+	}
+	return raw, nil
 }
 
 func attachClientMeta(c *gin.Context, meta *ChatRequestMeta) {

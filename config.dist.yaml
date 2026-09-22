@@ -8,6 +8,8 @@ gateway:
 
   # 控制台与 /admin/* 管理接口使用的管理 Key
   admin-key: "sk-admin-change-me"
+  # 上游 SSE 连续静默超过此时长则判定为断流。
+  stream-idle-timeout-seconds: 300
 
 system:
   db: sqlite
