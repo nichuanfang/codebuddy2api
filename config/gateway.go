@@ -29,7 +29,18 @@ type Gateway struct {
 	//   "full"               ——额外允许删除被污染的模板文本（句子级剪枝）。
 	//   "off"                ——完全关闭，仅用于排障对比。
 	// 无论取何值，被上游 11128 拒绝时都会自动升到 full 重发一次。
-	SanitizeMode string `mapstructure:"sanitize-mode" json:"sanitize-mode" yaml:"sanitize-mode"`
+	SanitizeMode    string `mapstructure:"sanitize-mode" json:"sanitize-mode" yaml:"sanitize-mode"`
+	CountTokensMode string `mapstructure:"count-tokens-mode" json:"count-tokens-mode" yaml:"count-tokens-mode"`
+}
+
+// CountTokensModeName selects local estimation by default; upstream mode is opt-in.
+func (g Gateway) CountTokensModeName() string {
+	switch strings.ToLower(strings.TrimSpace(g.CountTokensMode)) {
+	case "upstream":
+		return "upstream"
+	default:
+		return "estimate"
+	}
 }
 
 // SanitizeModeName 归一化配置值，回落到默认力度。

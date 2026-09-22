@@ -10,6 +10,8 @@ gateway:
   admin-key: "sk-admin-change-me"
   # 上游 SSE 连续静默超过此时长则判定为断流。
   stream-idle-timeout-seconds: 300
+  # /v1/messages/count_tokens 默认本地估算；可改为 upstream 获取真实 usage。
+  count-tokens-mode: "estimate"
 
 system:
   db: sqlite

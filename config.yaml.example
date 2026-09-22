@@ -39,6 +39,8 @@ gateway:
     #   full          — 额外允许删除被污染的模板文本（句子级剪枝）。被 11128 拒绝时自动升到这档。
     #   off           — 关闭清洗，仅用于排障对比。
     sanitize-mode: "harness"
+    # Anthropic count_tokens: estimate（默认）或 upstream（更准确但会消耗一次上游请求）
+    count-tokens-mode: "estimate"
 
 codebuddy:
     ide-type: CodeBuddyIDE

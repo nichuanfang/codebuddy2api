@@ -151,7 +151,117 @@ func (p *Proxy) HandleCountTokens(c *gin.Context) {
 		return
 	}
 	c.Header("anthropic-version", "2023-06-01")
+	if global.CORE_CONFIG.Gateway.CountTokensModeName() == "upstream" {
+		if _, err := PrepareAnthropicBody(raw); err != nil {
+			gatewayError(c, ProtocolAnthropic, http.StatusBadRequest, err.Error())
+			return
+		}
+		tokens, err := p.countTokensUpstream(c.Request.Context(), c.Request.Header, raw)
+		if err != nil {
+			gatewayError(c, ProtocolAnthropic, http.StatusBadGateway, err.Error())
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"input_tokens": tokens})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"input_tokens": estimateTokenCount(raw)})
+}
+
+func (p *Proxy) countTokensUpstream(ctx context.Context, headers http.Header, raw []byte) (int, error) {
+	meta, err := PrepareAnthropicBody(raw)
+	if err != nil {
+		return 0, err
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		return 0, fmt.Errorf("count_tokens body conversion failed: %w", err)
+	}
+	body["max_tokens"] = 1
+	body["stream"] = true
+	body["stream_options"] = map[string]any{"include_usage": true}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	meta.Body = encoded
+	meta.AffinityKey = RequestAffinityKey(headers, encoded)
+
+	exclude := map[uint]struct{}{}
+	refreshed := map[uint]bool{}
+	var lastErr error
+	for attempt := 0; attempt < global.CORE_CONFIG.Gateway.Retries(); attempt++ {
+		acc, err := p.rotator.NextForAffinity(exclude, meta.UpstreamModel, meta.AffinityKey)
+		if err != nil {
+			lastErr = err
+			break
+		}
+		exclude[acc.ID] = struct{}{}
+		if global.CORE_CONFIG.Refresh.Enabled && ShouldRefresh(acc.JWT, time.Hour) {
+			if refreshErr := p.refresher.RefreshAccount(ctx, acc); refreshErr != nil {
+				lastErr = refreshErr
+				p.rotator.MarkFailure(acc, refreshErr.Error())
+				continue
+			}
+		}
+
+		resp, cancel, err := p.doUpstreamAttempt(ctx, acc, "/v2/chat/completions", encoded)
+		if err != nil {
+			lastErr = err
+			p.rotator.MarkFailure(acc, err.Error())
+			continue
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			cancel()
+			if !refreshed[acc.ID] && global.CORE_CONFIG.Refresh.Enabled {
+				refreshed[acc.ID] = true
+				if refreshErr := p.refresher.RefreshAccount(ctx, acc); refreshErr == nil {
+					delete(exclude, acc.ID)
+					attempt--
+					continue
+				} else {
+					lastErr = refreshErr
+				}
+			} else {
+				lastErr = fmt.Errorf("upstream returned unauthorized after token refresh")
+			}
+			p.rotator.MarkFailure(acc, lastErr.Error())
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			errBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			cancel()
+			lastErr = fmt.Errorf("upstream count_tokens http %d: %s", resp.StatusCode, clip(errBody, 300))
+			if isModelQuotaExhausted(resp.StatusCode, errBody) {
+				p.rotator.MarkModelExhausted(acc, meta.UpstreamModel, lastErr.Error())
+			} else {
+				p.rotator.MarkFailure(acc, lastErr.Error())
+			}
+			continue
+		}
+
+		result, collectErr := collectSSE(resp.Body, meta.UpstreamModel)
+		resp.Body.Close()
+		cancel()
+		if collectErr != nil {
+			lastErr = collectErr
+			p.rotator.MarkFailure(acc, collectErr.Error())
+			continue
+		}
+		if result == nil || result.Usage == nil || result.Usage.PromptTokens <= 0 {
+			lastErr = fmt.Errorf("upstream count_tokens response did not include input usage")
+			p.rotator.MarkFailure(acc, lastErr.Error())
+			continue
+		}
+		p.rotator.MarkSuccessFor(acc, meta.UpstreamModel)
+		return result.Usage.PromptTokens, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no available codebuddy account for count_tokens")
+	}
+	return 0, lastErr
 }
 
 func (p *Proxy) HandleCompletions(c *gin.Context) {

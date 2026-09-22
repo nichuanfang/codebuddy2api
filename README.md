@@ -122,6 +122,8 @@ $env:GATEWAY_PASSWORDLESS = "true"
 
 `/v1/models` 优先读取 CodeBuddy 实时模型目录，并缓存 5 分钟；上游不可用时回退到本地目录。常见旧模型名可通过 `gateway.model-alias` 映射到当前模型。
 
+`/v1/messages/count_tokens` 默认使用本地估算。如需读取上游真实 usage，可设置 `gateway.count-tokens-mode: upstream`；该模式会发起一次最小生成请求，可能消耗上游额度。
+
 ## 登录与账号
 
 官方登录命令会打开 CodeBuddy 登录页，并把登录态保存到本地 SQLite：
