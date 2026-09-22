@@ -157,7 +157,7 @@ func (p *Proxy) nudgePreambleIfNeeded(c *gin.Context, meta *ChatRequestMeta, em 
 			global.CORE_LOG.Warn("preamble nudge encode failed", zap.Error(err))
 			return totalUsage, nil
 		}
-		acc, err := p.rotator.NextFor(nil, meta.UpstreamModel)
+		acc, err := p.rotator.NextForAffinity(nil, meta.UpstreamModel, meta.AffinityKey)
 		if err != nil {
 			global.CORE_LOG.Warn("preamble nudge has no account", zap.Error(err))
 			return totalUsage, nil

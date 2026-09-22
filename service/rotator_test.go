@@ -204,3 +204,40 @@ func TestPickStickyWalksForward(t *testing.T) {
 		t.Fatalf("next after 3 got %d", got.ID)
 	}
 }
+
+func TestSessionAffinityStaysAndFailsOver(t *testing.T) {
+	defer setupRotatorDB(t)()
+	a := addRotatorAccount(t, "a", "jwt-a", 20, true, 0)
+	b := addRotatorAccount(t, "b", "jwt-b", 20, true, 0)
+	global.CORE_CONFIG.Gateway.Rotate = "round_robin"
+	r := NewRotator()
+	first, err := r.NextForAffinity(nil, "deepseek-v4-pro", "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != a.ID {
+		t.Fatalf("first=%d want=%d", first.ID, a.ID)
+	}
+	reused, err := r.NextForAffinity(nil, "deepseek-v4-pro", "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.ID != a.ID {
+		t.Fatalf("session affinity lost: got=%d want=%d", reused.ID, a.ID)
+	}
+	other, err := r.NextForAffinity(nil, "deepseek-v4-pro", "session-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.ID != b.ID {
+		t.Fatalf("independent session did not rotate: got=%d want=%d", other.ID, b.ID)
+	}
+	r.MarkModelExhausted(a, "deepseek-v4-pro", "quota exhausted")
+	failover, err := r.NextForAffinity(nil, "deepseek-v4-pro", "session-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failover.ID != b.ID {
+		t.Fatalf("session did not fail over: got=%d want=%d", failover.ID, b.ID)
+	}
+}

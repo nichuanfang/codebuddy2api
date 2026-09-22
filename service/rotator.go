@@ -10,17 +10,25 @@ import (
 	"codebuddy-gateway/model"
 )
 
+type sessionBinding struct {
+	accountID uint
+	expiresAt time.Time
+	lastUsed  time.Time
+}
+
 type Rotator struct {
-	mu      sync.Mutex
-	index   int
-	sticky  map[string]uint
-	blocked map[string]time.Time
+	mu       sync.Mutex
+	index    int
+	sticky   map[string]uint
+	sessions map[string]sessionBinding
+	blocked  map[string]time.Time
 }
 
 func NewRotator() *Rotator {
 	return &Rotator{
-		sticky:  map[string]uint{},
-		blocked: map[string]time.Time{},
+		sticky:   map[string]uint{},
+		sessions: map[string]sessionBinding{},
+		blocked:  map[string]time.Time{},
 	}
 }
 
@@ -29,6 +37,13 @@ func (r *Rotator) Next(exclude map[uint]struct{}) (*model.Account, error) {
 }
 
 func (r *Rotator) NextFor(exclude map[uint]struct{}, modelName string) (*model.Account, error) {
+	return r.NextForAffinity(exclude, modelName, "")
+}
+
+// NextForAffinity selects an account while optionally keeping a caller/model
+// session on the same account. The affinity key is already privacy-preserving
+// and must never contain raw prompts or credentials.
+func (r *Rotator) NextForAffinity(exclude map[uint]struct{}, modelName, affinityKey string) (*model.Account, error) {
 	list, err := model.ListEnabledAccounts()
 	if err != nil {
 		return nil, err
@@ -36,6 +51,9 @@ func (r *Rotator) NextFor(exclude map[uint]struct{}, modelName string) (*model.A
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.sessions == nil {
+		r.sessions = map[string]sessionBinding{}
+	}
 	modelName = normalizeStickyModel(modelName)
 	now := time.Now()
 	candidates := make([]model.Account, 0, len(list))
@@ -73,6 +91,19 @@ func (r *Rotator) NextFor(exclude map[uint]struct{}, modelName string) (*model.A
 	// round_robin 轮转）。只排序的话收费号仍会被选中，达不到「优先免费」。
 	candidates = filterByCostTier(candidates, modelName)
 
+	if affinityKey != "" {
+		r.pruneSessionsLocked(now)
+		if binding, ok := r.sessions[affinityKey]; ok && now.Before(binding.expiresAt) {
+			for _, candidate := range candidates {
+				if candidate.ID == binding.accountID {
+					binding.lastUsed = now
+					r.sessions[affinityKey] = binding
+					return cloneAccount(candidate), nil
+				}
+			}
+		}
+	}
+
 	mode := rotateMode()
 	var picked model.Account
 	switch mode {
@@ -84,6 +115,15 @@ func (r *Rotator) NextFor(exclude map[uint]struct{}, modelName string) (*model.A
 		picked = candidates[start]
 	default:
 		picked = pickSticky(candidates, r.sticky[modelName])
+	}
+	if affinityKey != "" {
+		now := time.Now()
+		r.ensureSessionCapacityLocked()
+		r.sessions[affinityKey] = sessionBinding{
+			accountID: picked.ID,
+			expiresAt: now.Add(24 * time.Hour),
+			lastUsed:  now,
+		}
 	}
 	return cloneAccount(picked), nil
 }
@@ -124,6 +164,33 @@ func filterByCostTier(candidates []model.Account, modelName string) []model.Acco
 		return candidates
 	}
 	return kept
+}
+
+const maxSessionBindings = 4096
+
+func (r *Rotator) pruneSessionsLocked(now time.Time) {
+	for key, binding := range r.sessions {
+		if !now.Before(binding.expiresAt) {
+			delete(r.sessions, key)
+		}
+	}
+}
+
+func (r *Rotator) ensureSessionCapacityLocked() {
+	if len(r.sessions) < maxSessionBindings {
+		return
+	}
+	var oldestKey string
+	var oldest time.Time
+	for key, binding := range r.sessions {
+		if oldestKey == "" || binding.lastUsed.Before(oldest) {
+			oldestKey = key
+			oldest = binding.lastUsed
+		}
+	}
+	if oldestKey != "" {
+		delete(r.sessions, oldestKey)
+	}
 }
 
 func (r *Rotator) MarkSuccess(acc *model.Account) {

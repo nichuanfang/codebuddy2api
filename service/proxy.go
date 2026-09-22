@@ -38,6 +38,7 @@ type ChatRequestMeta struct {
 	ClientIP       string
 	UserAgent      string
 	RequestPreview string
+	AffinityKey    string
 }
 
 func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
@@ -95,6 +96,7 @@ func (p *Proxy) HandleChat(c *gin.Context) {
 		return
 	}
 	attachClientMeta(c, meta)
+	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
 }
 
@@ -114,6 +116,7 @@ func (p *Proxy) HandleResponses(c *gin.Context) {
 		return
 	}
 	attachClientMeta(c, meta)
+	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
 }
 
@@ -133,6 +136,7 @@ func (p *Proxy) HandleMessages(c *gin.Context) {
 		return
 	}
 	attachClientMeta(c, meta)
+	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
 }
 
@@ -192,6 +196,7 @@ func (p *Proxy) HandleCompletions(c *gin.Context) {
 		Body:           encoded,
 	}
 	attachClientMeta(c, meta)
+	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/completions")
 }
 
@@ -203,7 +208,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	wafRetried := false
 
 	for i := 0; i < retries; i++ {
-		acc, err := p.rotator.NextFor(exclude, meta.UpstreamModel)
+		acc, err := p.rotator.NextForAffinity(exclude, meta.UpstreamModel, meta.AffinityKey)
 		if err != nil {
 			lastErr = err.Error()
 			break
