@@ -16,12 +16,15 @@ import (
 
 const unattendedRuntimeNote = `Runtime: keep calling tools until the user's request is fully finished. Do not stop after announcing the next step, and do not wait for the user to say continue. File edits must use apply_patch; it is available and working. Never write files with python, heredoc, or shell redirection.`
 
+const modelExecutionNote = `Do not end a turn with a statement about an action you are about to take. If you say you will inspect, edit, run, rebuild, commit, or continue, call the corresponding tool in the same response. Only stop when the task is complete or a concrete blocker requires user input.`
+
 const applyPatchJSONHint = `When calling this tool, put the complete patch text in the "input" argument. The patch text must start with "*** Begin Patch" and end with "*** End Patch".`
 
 func injectUnattendedRuntime(chat map[string]any) {
 	if chat == nil || !chatHasFreeformTool(chat) {
 		return
 	}
+	model := asString(chat["model"])
 	msgs, _ := chat["messages"].([]any)
 	for _, item := range msgs {
 		m, _ := item.(map[string]any)
@@ -29,10 +32,43 @@ func injectUnattendedRuntime(chat map[string]any) {
 			continue
 		}
 		if asString(m["role"]) == "system" && asString(m["content"]) == unattendedRuntimeNote {
+			if requiresStrictExecution(model) {
+				for _, existing := range msgs {
+					em, _ := existing.(map[string]any)
+					if em != nil && asString(em["role"]) == "system" && asString(em["content"]) == modelExecutionNote {
+						return
+					}
+				}
+				chat["messages"] = append(msgs, map[string]any{"role": "system", "content": modelExecutionNote})
+			}
 			return
 		}
 	}
 	chat["messages"] = append(msgs, map[string]any{"role": "system", "content": unattendedRuntimeNote})
+	if requiresStrictExecution(model) {
+		chat["messages"] = append(chat["messages"].([]any), map[string]any{"role": "system", "content": modelExecutionNote})
+	}
+}
+
+type executionPolicy struct {
+	maxPreambleRetries int
+	strictPrompt       bool
+}
+
+func policyForModel(model string) executionPolicy {
+	model = strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.Contains(model, "deepseek-v4.1-flash"):
+		return executionPolicy{maxPreambleRetries: 2, strictPrompt: true}
+	case strings.HasPrefix(model, "glm-"):
+		return executionPolicy{maxPreambleRetries: 1, strictPrompt: true}
+	default:
+		return executionPolicy{maxPreambleRetries: 1}
+	}
+}
+
+func requiresStrictExecution(model string) bool {
+	return policyForModel(model).strictPrompt
 }
 
 func chatHasFreeformTool(chat map[string]any) bool {
@@ -65,7 +101,12 @@ func looksLikePreamble(s string) bool {
 	for _, n := range []string{
 		"i'll ", "i will ", "let me ", "next:", "next up",
 		"going to", "now making", "now i'll", "right after",
-		"one command", "接下来", "我来", "先改", "马上",
+		"one command", "now rebuild", "rebuilding ", "now commit",
+		"committing ", "continuing", "proceeding", "executing",
+		"resuming", "starting", "start by", "接下来", "我来",
+		"先改", "马上", "正在执行", "开始提交", "继续提交",
+		"现在提交", "准备提交", "开始重建", "继续重建", "现在重建",
+		"正在重建",
 	} {
 		if strings.Contains(low, n) {
 			return true
@@ -103,44 +144,60 @@ func (p *Proxy) nudgePreambleIfNeeded(c *gin.Context, meta *ChatRequestMeta, em 
 	if p == nil || p.rotator == nil || c == nil || meta == nil || meta.Protocol != ProtocolResponses {
 		return nil, nil
 	}
-	text, ok := shouldNudgeAdapter(em)
-	if !ok {
-		return nil, nil
+	policy := policyForModel(meta.UpstreamModel)
+	var totalUsage *parsedUsage
+	body := meta.Body
+	for attempt := 1; attempt <= policy.maxPreambleRetries; attempt++ {
+		text, ok := shouldNudgeAdapter(em)
+		if !ok {
+			return totalUsage, nil
+		}
+		nudged, err := nudgeChatBody(body, text)
+		if err != nil {
+			global.CORE_LOG.Warn("preamble nudge encode failed", zap.Error(err))
+			return totalUsage, nil
+		}
+		acc, err := p.rotator.NextFor(nil, meta.UpstreamModel)
+		if err != nil {
+			global.CORE_LOG.Warn("preamble nudge has no account", zap.Error(err))
+			return totalUsage, nil
+		}
+		nudgeCtx, cancel := context.WithCancel(c.Request.Context())
+		resp, err := p.doUpstream(nudgeCtx, acc, "/v2/chat/completions", nudged)
+		if err != nil {
+			cancel()
+			global.CORE_LOG.Warn("preamble nudge upstream failed", zap.Int("attempt", attempt), zap.Error(err))
+			return totalUsage, nil
+		}
+		if resp.StatusCode != http.StatusOK {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			cancel()
+			global.CORE_LOG.Warn("preamble nudge upstream status", zap.Int("attempt", attempt), zap.Int("status", resp.StatusCode))
+			return totalUsage, nil
+		}
+		global.CORE_LOG.Info("continued a Codex turn that announced work but did not call tools", zap.String("model", meta.UpstreamModel), zap.Int("attempt", attempt))
+		watchdog := startStreamIdleWatchdog(nudgeCtx, cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
+		usage, streamErr := pipeChatSSEToAdapter(resp.Body, em, watchdog)
+		watchdogTimedOut := watchdog.timedOutNow()
+		watchdog.stop()
+		resp.Body.Close()
+		cancel()
+		if streamErr == context.Canceled && watchdogTimedOut {
+			streamErr = errStreamIdle
+		}
+		if streamErr != nil {
+			totalUsage = mergeUsage(totalUsage, usage)
+			global.CORE_LOG.Warn("preamble nudge stream failed", zap.Int("attempt", attempt), zap.Error(streamErr))
+			return totalUsage, streamErr
+		}
+		totalUsage = mergeUsage(totalUsage, usage)
+		body = nudged
 	}
-	nudged, err := nudgeChatBody(meta.Body, text)
-	if err != nil {
-		global.CORE_LOG.Warn("preamble nudge encode failed", zap.Error(err))
-		return nil, nil
+	if _, ok := shouldNudgeAdapter(em); ok {
+		global.CORE_LOG.Warn("model stopped after announcing work without a tool call", zap.String("model", meta.UpstreamModel), zap.Int("max_attempts", policy.maxPreambleRetries))
 	}
-	acc, err := p.rotator.NextFor(nil, meta.UpstreamModel)
-	if err != nil {
-		global.CORE_LOG.Warn("preamble nudge has no account", zap.Error(err))
-		return nil, nil
-	}
-	nudgeCtx, cancel := context.WithCancel(c.Request.Context())
-	defer cancel()
-	resp, err := p.doUpstream(nudgeCtx, acc, "/v2/chat/completions", nudged)
-	if err != nil {
-		global.CORE_LOG.Warn("preamble nudge upstream failed", zap.Error(err))
-		return nil, nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
-		global.CORE_LOG.Warn("preamble nudge upstream status", zap.Int("status", resp.StatusCode))
-		return nil, nil
-	}
-	global.CORE_LOG.Info("continued a Codex turn that announced work but did not call tools")
-	watchdog := startStreamIdleWatchdog(nudgeCtx, cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
-	defer watchdog.stop()
-	usage, err := pipeChatSSEToAdapter(resp.Body, em, watchdog)
-	if err == context.Canceled && watchdog.timedOutNow() {
-		err = errStreamIdle
-	}
-	if err != nil {
-		global.CORE_LOG.Warn("preamble nudge stream failed", zap.Error(err))
-	}
-	return usage, err
+	return totalUsage, nil
 }
 
 func pipeChatSSEToAdapter(r io.Reader, em streamAdapter, watchdog *streamIdleWatchdog) (*parsedUsage, error) {
