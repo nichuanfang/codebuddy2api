@@ -34,6 +34,7 @@ func NewUpstreamClient() *UpstreamClient {
 	transport := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 15 * time.Second,
 		// 只限制「等到响应头」的时间，不限制流式 body 的持续时间。

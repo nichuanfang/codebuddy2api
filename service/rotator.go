@@ -29,13 +29,13 @@ func (r *Rotator) Next(exclude map[uint]struct{}) (*model.Account, error) {
 }
 
 func (r *Rotator) NextFor(exclude map[uint]struct{}, modelName string) (*model.Account, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	list, err := model.ListEnabledAccounts()
 	if err != nil {
 		return nil, err
 	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	modelName = normalizeStickyModel(modelName)
 	now := time.Now()
 	candidates := make([]model.Account, 0, len(list))
