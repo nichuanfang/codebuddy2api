@@ -1,10 +1,12 @@
 package command
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"text/tabwriter"
 
+	"codebuddy-gateway/core"
 	"codebuddy-gateway/model"
 	"codebuddy-gateway/service"
 
@@ -16,7 +18,7 @@ func NewAccountCommand() *cobra.Command {
 		Use:   "account",
 		Short: "Import and list local CodeBuddy accounts",
 	}
-	cmd.AddCommand(newAccountImportCommand(), newAccountListCommand())
+	cmd.AddCommand(newAccountImportCommand(), newAccountImportDesktopCommand(), newAccountListCommand())
 	return cmd
 }
 
@@ -62,6 +64,62 @@ func newAccountImportCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "parse only, do not write the database")
 	return cmd
+}
+
+func newAccountImportDesktopCommand() *cobra.Command {
+	var dryRun bool
+	var path string
+	cmd := &cobra.Command{
+		Use:          "import-desktop",
+		Short:        "Import existing CodeBuddy / WorkBuddy desktop login state",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			items, err := service.LoadDesktopAuthAccounts(path)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("found %d desktop account(s)\n", len(items))
+			for _, item := range items {
+				fmt.Printf("- %s jwt=%s refresh=%s\n", item.Name, service.MaskToken(item.JWT), service.MaskToken(item.RefreshToken))
+			}
+			if dryRun {
+				fmt.Println("dry-run: skip database")
+				return nil
+			}
+			Bootstrap(cmd)
+			created, updated, err := service.ImportDesktopAccounts(items)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("imported created=%d updated=%d\n", created, updated)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&path, "path", "", "desktop auth directory override")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "parse only, do not write the database")
+	return cmd
+}
+
+// TryImportDesktopAccounts is used by the Windows double-click flow. A missing
+// desktop auth snapshot is not an error: the caller can fall back to browser
+// login. Malformed snapshots are also returned so the caller can report them.
+func TryImportDesktopAccounts(configPath string) (created, updated int, found bool, err error) {
+	items, err := service.LoadDesktopAuthAccounts("")
+	if err != nil {
+		if errors.Is(err, service.ErrDesktopAuthNotFound) {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, err
+	}
+	cmd := &cobra.Command{}
+	cmd.Flags().String("config", configPath, "")
+	cmd.Flags().String("api-key", "", "")
+	cmd.Flags().String("admin-key", "", "")
+	cmd.Flags().Bool("dev", false, "")
+	Bootstrap(cmd)
+	defer core.CloseDB()
+	created, updated, err = service.ImportDesktopAccounts(items)
+	return created, updated, true, err
 }
 
 func newAccountListCommand() *cobra.Command {

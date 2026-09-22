@@ -136,12 +136,15 @@ $env:GATEWAY_PASSWORDLESS = "true"
 .\codebuddy-gateway.exe auth login --no-browser
 ```
 
-也支持导入 CodeBuddy / WorkBuddy 导出的 JSON：
+也支持导入 CodeBuddy / WorkBuddy 导出的 JSON，或直接导入桌面端已有登录态：
 
 ```powershell
 .\codebuddy-gateway.exe account import .\accounts.json
+.\codebuddy-gateway.exe account import-desktop
 .\codebuddy-gateway.exe account list
 ```
+
+`account import-desktop` 会自动查找 CodeBuddy/WorkBuddy 的本地 `*.info` 登录快照，导入后只写入网关自己的 SQLite，不会回写桌面端文件。也可以使用 `--path` 指定 auth 目录，使用 `--dry-run` 只解析不入库。
 
 账号、刷新令牌、额度和用量只保存在当前目录的 `data/gateway.db`，请妥善保护整个目录。
 

@@ -31,7 +31,8 @@ func CloseDB() {
 	if global.CORE_DB != nil {
 		sqlDB, err := global.CORE_DB.DB()
 		if err == nil {
-			sqlDB.Close()
+			_ = sqlDB.Close()
 		}
+		global.CORE_DB = nil
 	}
 }

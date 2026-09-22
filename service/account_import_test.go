@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,5 +138,32 @@ func TestImportedUIDFallsBackToJWT(t *testing.T) {
 	acc2 := ImportedAccount{Name: "n", JWT: token, UserID: "explicit-uid"}.ToModel()
 	if got := acc2.UID(); got != "explicit-uid" {
 		t.Fatalf("落库 UserID 应优先，实际 %q", got)
+	}
+}
+
+func TestLoadDesktopAuthAccounts(t *testing.T) {
+	dir := t.TempDir()
+	old := os.Getenv("CODEBUDDY_AUTH_DIR")
+	defer os.Setenv("CODEBUDDY_AUTH_DIR", old)
+	if err := os.Setenv("CODEBUDDY_AUTH_DIR", dir); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"auth":{"accessToken":"jwt-desktop","refreshToken":"refresh-desktop"},"account":{"uid":"u-1","nickname":"Desktop User"}}`
+	if err := os.WriteFile(filepath.Join(dir, "account.info"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items, err := LoadDesktopAuthAccounts("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].JWT != "jwt-desktop" || items[0].RefreshToken != "refresh-desktop" {
+		t.Fatalf("items=%+v", items)
+	}
+}
+
+func TestLoadDesktopAuthAccountsMissing(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadDesktopAuthAccounts(dir); !errors.Is(err, ErrDesktopAuthNotFound) {
+		t.Fatalf("err=%v", err)
 	}
 }
