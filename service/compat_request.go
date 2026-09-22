@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -61,10 +62,20 @@ func responsesToChat(raw []byte) (map[string]any, error) {
 	}
 
 	messages := make([]any, 0, 4)
-	if inst := extractTextContent(src["instructions"]); inst != "" {
-		messages = append(messages, map[string]any{"role": "system", "content": inst})
+	if src["instructions"] != nil {
+		inst, err := convertChatContent(src["instructions"])
+		if err != nil {
+			return nil, fmt.Errorf("instructions: %w", err)
+		}
+		if inst != nil && inst != "" {
+			messages = append(messages, map[string]any{"role": "system", "content": inst})
+		}
 	}
-	messages = append(messages, convertResponsesInput(src["input"])...)
+	convertedInput, err := convertResponsesInput(src["input"])
+	if err != nil {
+		return nil, err
+	}
+	messages = append(messages, convertedInput...)
 	chat["messages"] = messages
 
 	if tools := convertResponsesTools(src["tools"]); tools != nil {
@@ -98,26 +109,22 @@ func normalizeUpstreamRole(role string) string {
 	}
 }
 
-func convertResponsesInput(v any) []any {
+func convertResponsesInput(v any) ([]any, error) {
 	if v == nil {
-		return nil
+		return nil, nil
 	}
 	if s, ok := v.(string); ok {
 		if s == "" {
-			return nil
+			return nil, nil
 		}
-		return []any{map[string]any{"role": "user", "content": s}}
+		return []any{map[string]any{"role": "user", "content": s}}, nil
 	}
 	arr, ok := v.([]any)
 	if !ok {
 		if m, ok := v.(map[string]any); ok {
 			arr = []any{m}
 		} else {
-			text := extractTextContent(v)
-			if text == "" {
-				return nil
-			}
-			return []any{map[string]any{"role": "user", "content": text}}
+			return nil, fmt.Errorf("responses input must be a string, object, or array")
 		}
 	}
 	messages := make([]any, 0, len(arr))
@@ -141,7 +148,7 @@ func convertResponsesInput(v any) []any {
 		}
 		m, _ := item.(map[string]any)
 		if m == nil {
-			continue
+			return nil, fmt.Errorf("responses input items must be objects")
 		}
 		typ := asString(m["type"])
 		role := asString(m["role"])
@@ -154,17 +161,24 @@ func convertResponsesInput(v any) []any {
 			if callID == "" {
 				callID = asString(m["tool_use_id"])
 			}
+			content, err := convertChatContent(firstNonNil(m["output"], m["content"]))
+			if err != nil {
+				return nil, err
+			}
 			messages = append(messages, map[string]any{
 				"role":         "tool",
 				"tool_call_id": callID,
-				"content":      extractTextContent(firstNonNil(m["output"], m["content"])),
+				"content":      content,
 			})
 		case "reasoning", "item_reference":
 			continue
 		default:
 			flush()
 			role = normalizeUpstreamRole(role)
-			content := convertResponsesContent(m["content"])
+			content, err := convertChatContent(m["content"])
+			if err != nil {
+				return nil, err
+			}
 			if content == nil || content == "" {
 				if t := asString(m["text"]); t != "" {
 					content = t
@@ -174,7 +188,7 @@ func convertResponsesInput(v any) []any {
 		}
 	}
 	flush()
-	return messages
+	return messages, nil
 }
 
 func responsesFunctionCallToToolCall(m map[string]any) map[string]any {
@@ -247,53 +261,153 @@ func ensureFreeformJSONArgs(args string) string {
 	return string(b)
 }
 
-func convertResponsesContent(v any) any {
+func convertChatContent(v any) (any, error) {
 	if v == nil {
-		return ""
+		return "", nil
 	}
 	if s, ok := v.(string); ok {
-		return s
+		return s, nil
 	}
-	arr, ok := v.([]any)
-	if !ok {
-		return extractTextContent(v)
+	var arr []any
+	switch value := v.(type) {
+	case []any:
+		arr = value
+	case map[string]any:
+		arr = []any{value}
+	default:
+		return nil, fmt.Errorf("content must be a string or an array of blocks")
 	}
+
 	parts := make([]any, 0, len(arr))
 	var text strings.Builder
 	onlyText := true
-	for _, item := range arr {
+	for i, item := range arr {
 		if s, ok := item.(string); ok {
 			text.WriteString(s)
 			parts = append(parts, map[string]any{"type": "text", "text": s})
 			continue
 		}
-		m, _ := item.(map[string]any)
-		if m == nil {
-			continue
+		m, ok := item.(map[string]any)
+		if !ok || m == nil {
+			return nil, fmt.Errorf("content block %d must be an object", i)
 		}
-		typ := asString(m["type"])
+		typ := strings.ToLower(strings.TrimSpace(asString(m["type"])))
 		switch typ {
 		case "input_text", "output_text", "text", "summary_text":
 			t := asString(m["text"])
 			text.WriteString(t)
 			parts = append(parts, map[string]any{"type": "text", "text": t})
 		case "input_image", "image_url", "image":
-			onlyText = false
-			parts = append(parts, map[string]any{
-				"type":      "image_url",
-				"image_url": map[string]any{"url": imageURLFromPart(m)},
-			})
-		default:
-			if t := asString(m["text"]); t != "" {
-				text.WriteString(t)
-				parts = append(parts, map[string]any{"type": "text", "text": t})
+			image, err := chatImagePart(m, typ)
+			if err != nil {
+				return nil, fmt.Errorf("content block %d: %w", i, err)
 			}
+			onlyText = false
+			parts = append(parts, image)
+		default:
+			return nil, fmt.Errorf("unsupported content block type %q", typ)
 		}
 	}
 	if onlyText {
-		return text.String()
+		return text.String(), nil
 	}
-	return parts
+	return parts, nil
+}
+
+func chatImagePart(m map[string]any, typ string) (map[string]any, error) {
+	url, detail, err := imageURLAndDetail(m, typ)
+	if err != nil {
+		return nil, err
+	}
+	imageURL := map[string]any{"url": url}
+	if detail == "" {
+		detail = asString(m["detail"])
+	}
+	if detail != "" {
+		imageURL["detail"] = detail
+	}
+	return map[string]any{
+		"type":      "image_url",
+		"image_url": imageURL,
+	}, nil
+}
+
+func imageURLAndDetail(m map[string]any, typ string) (string, string, error) {
+	if typ == "input_image" && strings.TrimSpace(asString(m["file_id"])) != "" {
+		return "", "", fmt.Errorf("file_id images are not supported")
+	}
+
+	if raw, ok := m["image_url"]; ok {
+		switch value := raw.(type) {
+		case string:
+			return validateImageURL(value)
+		case map[string]any:
+			url := asString(value["url"])
+			if url == "" {
+				return "", "", fmt.Errorf("image_url.url must be non-empty")
+			}
+			validURL, detail, err := validateImageURL(url)
+			if err != nil {
+				return "", "", err
+			}
+			if detail == "" {
+				detail = asString(value["detail"])
+			}
+			return validURL, detail, nil
+		default:
+			return "", "", fmt.Errorf("image_url must be a string or object")
+		}
+	}
+
+	if src, ok := m["source"].(map[string]any); ok {
+		sourceType := strings.ToLower(strings.TrimSpace(asString(src["type"])))
+		switch sourceType {
+		case "url":
+			return validateImageURL(asString(src["url"]))
+		case "base64":
+			mediaType := asString(src["media_type"])
+			data := asString(src["data"])
+			if !strings.HasPrefix(strings.ToLower(mediaType), "image/") || data == "" {
+				return "", "", fmt.Errorf("base64 images require media_type and data")
+			}
+			if err := validateBase64(data); err != nil {
+				return "", "", fmt.Errorf("invalid base64 image data: %w", err)
+			}
+			return "data:" + mediaType + ";base64," + data, "", nil
+		default:
+			return "", "", fmt.Errorf("image source must use url or base64")
+		}
+	}
+
+	if rawURL := asString(m["url"]); rawURL != "" {
+		return validateImageURL(rawURL)
+	}
+	return "", "", fmt.Errorf("image URL or source is required")
+}
+
+func validateImageURL(raw string) (string, string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", "", fmt.Errorf("image URL must be non-empty")
+	}
+	if strings.HasPrefix(strings.ToLower(value), "data:") {
+		parts := strings.SplitN(value, ",", 2)
+		if len(parts) != 2 || !strings.Contains(strings.ToLower(parts[0]), ";base64") {
+			return "", "", fmt.Errorf("image data URL must contain base64 data")
+		}
+		if err := validateBase64(parts[1]); err != nil {
+			return "", "", fmt.Errorf("invalid base64 image data: %w", err)
+		}
+	}
+	return value, "", nil
+}
+
+func validateBase64(value string) error {
+	if _, err := base64.StdEncoding.DecodeString(value); err == nil {
+		return nil
+	}
+	_, err := base64.RawStdEncoding.DecodeString(value)
+	return err
 }
 
 func convertResponsesTools(v any) any {
@@ -463,10 +577,20 @@ func anthropicToChat(raw []byte) (map[string]any, error) {
 	}
 
 	messages := make([]any, 0, 4)
-	if sys := extractAnthropicSystem(src["system"]); sys != "" {
-		messages = append(messages, map[string]any{"role": "system", "content": sys})
+	if src["system"] != nil {
+		sys, err := convertChatContent(src["system"])
+		if err != nil {
+			return nil, fmt.Errorf("system: %w", err)
+		}
+		if sys != nil && sys != "" {
+			messages = append(messages, map[string]any{"role": "system", "content": sys})
+		}
 	}
-	messages = append(messages, convertAnthropicMessages(src["messages"])...)
+	convertedMessages, err := convertAnthropicMessages(src["messages"])
+	if err != nil {
+		return nil, err
+	}
+	messages = append(messages, convertedMessages...)
 	chat["messages"] = messages
 
 	if tools := convertAnthropicTools(src["tools"]); tools != nil {
@@ -485,20 +609,16 @@ func anthropicToChat(raw []byte) (map[string]any, error) {
 	return chat, nil
 }
 
-func extractAnthropicSystem(v any) string {
-	return extractTextContent(v)
-}
-
-func convertAnthropicMessages(v any) []any {
+func convertAnthropicMessages(v any) ([]any, error) {
 	arr, ok := v.([]any)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	out := make([]any, 0, len(arr))
 	for _, item := range arr {
 		m, _ := item.(map[string]any)
 		if m == nil {
-			continue
+			return nil, fmt.Errorf("anthropic messages must contain objects")
 		}
 		role := asString(m["role"])
 		if role == "" {
@@ -510,29 +630,38 @@ func convertAnthropicMessages(v any) []any {
 		}
 		parts, _ := m["content"].([]any)
 		if len(parts) == 0 {
-			out = append(out, map[string]any{"role": role, "content": extractTextContent(m["content"])})
+			content, err := convertChatContent(m["content"])
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, map[string]any{"role": role, "content": content})
 			continue
 		}
-		var textParts []any
+
+		var contentParts []any
 		var toolCalls []any
-		onlyText := true
-		for _, part := range parts {
-			pm, _ := part.(map[string]any)
-			if pm == nil {
-				if s, ok := part.(string); ok && s != "" {
-					textParts = append(textParts, map[string]any{"type": "text", "text": s})
-				}
-				continue
+		hasImage := false
+		var toolResults []any
+		for i, part := range parts {
+			pm, ok := part.(map[string]any)
+			if !ok || pm == nil {
+				return nil, fmt.Errorf("anthropic content block %d must be an object", i)
 			}
-			switch asString(pm["type"]) {
-			case "text":
-				textParts = append(textParts, map[string]any{"type": "text", "text": asString(pm["text"])})
-			case "image":
-				onlyText = false
-				textParts = append(textParts, map[string]any{
-					"type":      "image_url",
-					"image_url": map[string]any{"url": imageURLFromPart(pm)},
-				})
+			typ := strings.ToLower(strings.TrimSpace(asString(pm["type"])))
+			switch typ {
+			case "text", "input_text", "output_text", "summary_text", "image":
+				content, err := convertChatContent(pm)
+				if err != nil {
+					return nil, err
+				}
+				if typ == "image" {
+					hasImage = true
+				}
+				if list, ok := content.([]any); ok {
+					contentParts = append(contentParts, list...)
+				} else if content != "" {
+					contentParts = append(contentParts, map[string]any{"type": "text", "text": content})
+				}
 			case "tool_use":
 				toolCalls = append(toolCalls, map[string]any{
 					"id":   asString(pm["id"]),
@@ -543,48 +672,59 @@ func convertAnthropicMessages(v any) []any {
 					},
 				})
 			case "tool_result":
-				out = append(out, map[string]any{
+				content, err := convertChatContent(pm["content"])
+				if err != nil {
+					return nil, err
+				}
+				toolResults = append(toolResults, map[string]any{
 					"role":         "tool",
 					"tool_call_id": asString(firstNonNil(pm["tool_use_id"], pm["id"])),
-					"content":      extractTextContent(pm["content"]),
+					"content":      content,
 				})
+			default:
+				return nil, fmt.Errorf("unsupported Anthropic content block type %q", typ)
 			}
 		}
+
+		// Anthropic may mix tool_result blocks and normal user content in one
+		// message. Keep every tool result adjacent to the preceding tool call,
+		// then emit the remaining user content as a separate Chat message.
+		out = append(out, toolResults...)
 		if len(toolCalls) > 0 {
-			msg := map[string]any{
+			assistant := map[string]any{
 				"role":       "assistant",
 				"tool_calls": toolCalls,
 			}
-			if onlyText {
-				msg["content"] = joinTextParts(textParts)
-			} else if len(textParts) > 0 {
-				msg["content"] = textParts
+			if len(contentParts) == 0 {
+				assistant["content"] = nil
+			} else if !hasImage {
+				assistant["content"] = joinTextParts(contentParts)
 			} else {
-				msg["content"] = nil
+				assistant["content"] = contentParts
 			}
-			out = append(out, msg)
+			out = append(out, assistant)
 			continue
 		}
-		if len(textParts) == 0 {
+		if len(contentParts) == 0 {
 			continue
+		}
+		var content any
+		if !hasImage {
+			content = joinTextParts(contentParts)
+		} else {
+			content = contentParts
 		}
 		if role == "tool" {
 			out = append(out, map[string]any{
 				"role":         "tool",
 				"tool_call_id": asString(m["tool_call_id"]),
-				"content":      joinTextParts(textParts),
+				"content":      content,
 			})
-			continue
-		}
-		msg := map[string]any{"role": role}
-		if onlyText {
-			msg["content"] = joinTextParts(textParts)
 		} else {
-			msg["content"] = textParts
+			out = append(out, map[string]any{"role": role, "content": content})
 		}
-		out = append(out, msg)
 	}
-	return out
+	return out, nil
 }
 
 func convertAnthropicTools(v any) any {
@@ -649,36 +789,6 @@ func convertAnthropicToolChoice(v any) any {
 	default:
 		return v
 	}
-}
-
-func imageURLFromPart(m map[string]any) string {
-	if s := asString(m["image_url"]); s != "" {
-		return s
-	}
-	if nested, ok := m["image_url"].(map[string]any); ok {
-		if s := asString(nested["url"]); s != "" {
-			return s
-		}
-	}
-	if src, ok := m["source"].(map[string]any); ok {
-		if asString(src["type"]) == "url" {
-			if s := asString(src["url"]); s != "" {
-				return s
-			}
-		}
-		media := asString(src["media_type"])
-		data := asString(src["data"])
-		if media != "" && data != "" {
-			return "data:" + media + ";base64," + data
-		}
-		if s := asString(src["url"]); s != "" {
-			return s
-		}
-	}
-	if s := asString(m["url"]); s != "" {
-		return s
-	}
-	return extractTextContent(m)
 }
 
 func joinTextParts(parts []any) string {
