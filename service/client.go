@@ -10,11 +10,16 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"codebuddy-gateway/global"
 	"codebuddy-gateway/model"
 )
+
+var gzipWriterPool = sync.Pool{
+	New: func() any { return gzip.NewWriter(io.Discard) },
+}
 
 type UpstreamClient struct {
 	httpClient *http.Client
@@ -151,14 +156,14 @@ func (c *UpstreamClient) CheckAccount(ctx context.Context, acc *model.Account) e
 
 func (c *UpstreamClient) doJSON(ctx context.Context, method, path string, acc *model.Account, body []byte, sse bool) (*http.Response, error) {
 	payload := body
-	headersExtra := map[string]string{}
+	compressed := false
 	if global.CORE_CONFIG.Gateway.Gzip {
-		compressed, err := gzipBytes(body)
+		var err error
+		payload, err = gzipBytes(body)
 		if err != nil {
 			return nil, err
 		}
-		payload = compressed
-		headersExtra["Content-Encoding"] = "gzip"
+		compressed = true
 	}
 	req, err := http.NewRequestWithContext(ctx, method, joinURL(global.CORE_CONFIG.Gateway.UpstreamBase(), path), bytes.NewReader(payload))
 	if err != nil {
@@ -173,8 +178,8 @@ func (c *UpstreamClient) doJSON(ctx context.Context, method, path string, acc *m
 	if sse {
 		req.Header.Set("Accept", "text/event-stream")
 	}
-	for k, v := range headersExtra {
-		req.Header.Set(k, v)
+	if compressed {
+		req.Header.Set("Content-Encoding", "gzip")
 	}
 	return c.httpClient.Do(req)
 }
@@ -196,14 +201,19 @@ func applyCodeBuddyHeaders(req *http.Request, jwt, intent string) {
 
 func gzipBytes(raw []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
+	buf.Grow(len(raw) / 2)
+	zw := gzipWriterPool.Get().(*gzip.Writer)
+	zw.Reset(&buf)
 	if _, err := zw.Write(raw); err != nil {
 		_ = zw.Close()
+		gzipWriterPool.Put(zw)
 		return nil, err
 	}
 	if err := zw.Close(); err != nil {
+		gzipWriterPool.Put(zw)
 		return nil, err
 	}
+	gzipWriterPool.Put(zw)
 	return buf.Bytes(), nil
 }
 

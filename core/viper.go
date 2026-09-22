@@ -22,6 +22,8 @@ func Viper(path ...string) *viper.Viper {
 	v := viper.New()
 	v.SetConfigFile(config)
 	v.SetConfigType("yaml")
+	v.SetDefault("passwordless.enabled", false)
+	_ = v.BindEnv("passwordless.enabled", "GATEWAY_PASSWORDLESS", "PASSWORDLESS_ENABLED")
 	if err := v.ReadInConfig(); err != nil {
 		panic(fmt.Errorf("Fatal error config file: %s \n", err))
 	}

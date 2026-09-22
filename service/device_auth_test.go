@@ -14,7 +14,11 @@ func TestParseAuthState(t *testing.T) {
 }
 
 func TestParseAuthTokenPendingAndOK(t *testing.T) {
-	pending, token, err := parseAuthToken([]byte(`{"code":10008,"msg":"pending"}`))
+	pending, token, err := parseAuthToken([]byte(`{"code":11217,"msg":"login ing..."}`))
+	if err != nil || !pending || token != nil {
+		t.Fatalf("login-in-progress pending=%v token=%v err=%v", pending, token, err)
+	}
+	pending, token, err = parseAuthToken([]byte(`{"code":10008,"msg":"pending"}`))
 	if err != nil || !pending || token != nil {
 		t.Fatalf("pending=%v token=%v err=%v", pending, token, err)
 	}

@@ -22,37 +22,64 @@ type LLMModel struct {
 func (LLMModel) TableName() string { return "llm_models" }
 
 func SeedDefaultModels(db *gorm.DB) error {
+	seeds := defaultModels()
 	var count int64
 	if err := db.Model(&LLMModel{}).Count(&count).Error; err != nil {
 		return err
 	}
-	if count > 0 {
-		return nil
+	if count == 0 {
+		return db.Create(&seeds).Error
 	}
-	seeds := []LLMModel{
-		{ModelID: "auto", DisplayName: "Auto", MaxInput: 168000, MaxOutput: 32000, Vision: true, Enabled: true, Sort: 10},
-		{ModelID: "hy3", DisplayName: "Hy3", MaxInput: 192000, MaxOutput: 64000, Reasoning: true, Enabled: true, Sort: 20},
-		{ModelID: "hy3-preview", DisplayName: "Hy3 preview", MaxInput: 192000, MaxOutput: 64000, Reasoning: true, Enabled: true, Sort: 30},
-		{ModelID: "glm-5.2", DisplayName: "GLM-5.2", MaxInput: 200000, MaxOutput: 48000, Reasoning: true, Enabled: true, Sort: 40},
-		{ModelID: "glm-5.1", DisplayName: "GLM-5.1", MaxInput: 200000, MaxOutput: 48000, Reasoning: true, Enabled: true, Sort: 50},
-		{ModelID: "glm-5.0-turbo", DisplayName: "GLM-5.0-Turbo", MaxInput: 200000, MaxOutput: 48000, Reasoning: true, Enabled: true, Sort: 60},
-		{ModelID: "glm-5v-turbo", DisplayName: "GLM-5V-Turbo", MaxInput: 200000, MaxOutput: 48000, Vision: true, Reasoning: true, Enabled: true, Sort: 70},
-		{ModelID: "glm-4.7", DisplayName: "GLM-4.7", MaxInput: 200000, MaxOutput: 48000, Vision: true, Reasoning: true, Enabled: true, Sort: 80},
-		{ModelID: "kimi-k3", DisplayName: "Kimi-K3", MaxInput: 256000, MaxOutput: 32000, Vision: true, Reasoning: true, Enabled: true, Sort: 90},
-		{ModelID: "kimi-k2.7-code", DisplayName: "Kimi-K2.7-Code", MaxInput: 256000, MaxOutput: 32000, Vision: true, Reasoning: true, Enabled: true, Sort: 100},
-		{ModelID: "kimi-k2.6", DisplayName: "Kimi-K2.6", MaxInput: 256000, MaxOutput: 32000, Vision: true, Reasoning: true, Enabled: true, Sort: 110},
-		{ModelID: "deepseek-v4-pro", DisplayName: "DeepSeek-V4-Pro", MaxInput: 128000, MaxOutput: 32000, Vision: true, Reasoning: true, Enabled: true, Sort: 120},
-		{ModelID: "deepseek-v4-flash", DisplayName: "DeepSeek-V4-Flash", MaxInput: 128000, MaxOutput: 32000, Vision: true, Enabled: true, Sort: 130},
-		{ModelID: "deepseek-v3-2-volc", DisplayName: "DeepSeek-V3.2", MaxInput: 96000, MaxOutput: 32000, Vision: true, Reasoning: true, Enabled: true, Sort: 140},
-		{ModelID: "deepseek-r1-0528-lkeap", DisplayName: "DeepSeek-R1-0528", MaxInput: 112000, MaxOutput: 16000, Enabled: true, Sort: 150},
-		{ModelID: "minimax-m3", DisplayName: "MiniMax-M3", MaxInput: 200000, MaxOutput: 48000, Vision: true, Reasoning: true, Enabled: true, Sort: 160},
-		{ModelID: "minimax-m2.7", DisplayName: "MiniMax-M2.7", MaxInput: 200000, MaxOutput: 48000, Vision: true, Reasoning: true, Enabled: true, Sort: 170},
-		{ModelID: "hunyuan-chat", DisplayName: "Hunyuan-Turbos", MaxInput: 128000, MaxOutput: 8000, Enabled: true, Sort: 180},
-		{ModelID: "codewise-completions", DisplayName: "Codewise Completions", MaxOutput: 256, Enabled: true, Sort: 190},
+
+	// 启动时同步新增模型和展示信息，但不覆盖用户在面板里手动设置的 Enabled。
+	for _, seed := range seeds {
+		var existing LLMModel
+		err := db.Where("model_id = ?", seed.ModelID).First(&existing).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := db.Create(&seed).Error; err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := db.Model(&existing).Updates(map[string]any{
+			"display_name": seed.DisplayName,
+			"max_input":    seed.MaxInput,
+			"max_output":   seed.MaxOutput,
+			"vision":       seed.Vision,
+			"reasoning":    seed.Reasoning,
+			"sort":         seed.Sort,
+		}).Error; err != nil {
+			return err
+		}
 	}
-	return db.Create(&seeds).Error
+
+	// 这些是旧版本内置的模型。它们不再出现在本地兜底目录中，
+	// 但不影响用户通过 passthrough 直接请求旧模型 ID。
+	legacyIDs := []string{
+		"glm-5.2", "glm-5.1", "glm-5.0-turbo", "glm-5v-turbo", "glm-4.7",
+		"kimi-k2.7-code", "kimi-k2.6", "deepseek-v4-flash", "deepseek-v3-2-volc",
+		"deepseek-r1-0528-lkeap", "minimax-m3", "minimax-m2.7", "hunyuan-chat",
+		"codewise-completions",
+	}
+	return db.Model(&LLMModel{}).Where("model_id IN ?", legacyIDs).Update("enabled", false).Error
 }
 
+func defaultModels() []LLMModel {
+	return []LLMModel{
+		{ModelID: "auto", DisplayName: "Auto", MaxInput: 168000, MaxOutput: 32000, Vision: true, Enabled: true, Sort: 10},
+		{ModelID: "hy4-preview", DisplayName: "Hy4 preview", MaxInput: 192000, MaxOutput: 64000, Reasoning: true, Enabled: true, Sort: 20},
+		{ModelID: "hy3", DisplayName: "Hy3", MaxInput: 192000, MaxOutput: 64000, Reasoning: true, Enabled: true, Sort: 30},
+		{ModelID: "hy3-preview", DisplayName: "Hy3 preview", MaxInput: 192000, MaxOutput: 64000, Reasoning: true, Enabled: true, Sort: 40},
+		{ModelID: "deepseek-v4.1-flash", DisplayName: "DeepSeek-V4.1-Flash", MaxInput: 128000, MaxOutput: 32000, Vision: true, Reasoning: true, Enabled: true, Sort: 50},
+		{ModelID: "deepseek-v4-pro", DisplayName: "DeepSeek-V4-Pro", MaxInput: 128000, MaxOutput: 32000, Vision: true, Reasoning: true, Enabled: true, Sort: 60},
+		{ModelID: "glm-5.3", DisplayName: "GLM-5.3", MaxInput: 200000, MaxOutput: 48000, Reasoning: true, Enabled: true, Sort: 70},
+		{ModelID: "glm-5.3-flash", DisplayName: "GLM-5.3-Flash", MaxInput: 200000, MaxOutput: 48000, Reasoning: true, Enabled: true, Sort: 80},
+		{ModelID: "kimi-k3", DisplayName: "Kimi-K3", MaxInput: 256000, MaxOutput: 32000, Vision: true, Reasoning: true, Enabled: true, Sort: 90},
+	}
+}
 func ListEnabledModels() ([]LLMModel, error) {
 	var list []LLMModel
 	err := MustDB().Where("enabled = ?", true).Order("sort asc, id asc").Find(&list).Error

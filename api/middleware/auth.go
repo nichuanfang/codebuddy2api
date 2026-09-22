@@ -14,7 +14,7 @@ import (
 
 func OpenAIAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !matchKey(extractBearer(c), global.CORE_CONFIG.Gateway.APIKey) {
+		if !global.CORE_CONFIG.Passwordless.Enabled && !matchKey(extractBearer(c), global.CORE_CONFIG.Gateway.APIKey) {
 			if strings.HasPrefix(c.Request.URL.Path, "/v1/messages") {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 					"type":  "error",

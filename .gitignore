@@ -1,5 +1,8 @@
+# 构建产物与本地运行数据
+/dist/
 /codebuddy-gateway
 /codebuddy-gateway.exe
+/codebuddy-gateway.exe~
 *.pid
 *.log
 log/
@@ -8,16 +11,19 @@ data/
 .vscode/
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 secrets/
 config.local.yaml
 config.yaml
-workbuddy-desktop-*.json
-*.local.json
 .env
 .runtime-keys
-*.db-wal
-*.db-shm
-data/**
+workbuddy-desktop-*.json
+*.local.json
 /cb-gateway-dev
 /cb-gateway-dev.exe
 config.dev.yaml
+.gocache/
+
+/auths/
+*.tar.gz

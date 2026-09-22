@@ -1,0 +1,25 @@
+# CodeBuddy2API 用户配置
+# 日常只需要修改 gateway.api-key / gateway.admin-key。
+# 完整字段见 config.reference.yaml；免密只需把 passwordless.enabled 改为 true。
+
+gateway:
+  # 下游客户端调用 /v1/* 时使用的 API Key
+  api-key: "sk-change-me"
+
+  # 控制台与 /admin/* 管理接口使用的管理 Key
+  admin-key: "sk-admin-change-me"
+
+system:
+  db: sqlite
+  # 0.0.0.0:8088 = 本机 + 局域网；127.0.0.1:8088 = 仅本机
+  listenAddr: "127.0.0.1:8088"
+
+# 免密模式：true 时 /v1/* 不校验下游 API Key。
+# 建议同时把 system.listenAddr 改为 127.0.0.1:8088。
+# 控制台仍需要 gateway.admin-key。
+passwordless:
+  enabled: false
+
+# 服务会自动创建 data 目录和数据库；一般不用改
+sqlite:
+  path: data/gateway.db

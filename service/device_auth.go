@@ -14,7 +14,10 @@ import (
 )
 
 const (
-	deviceAuthPendingCode = 10008
+	// CodeBuddy 返回 10008 表示等待登录；11217（"login ing..."）
+	// 也表示登录尚未完成，需要继续轮询，而不是直接失败。
+	deviceAuthPendingCode     = 10008
+	deviceAuthLoginInProgress = 11217
 )
 
 type DeviceAuthSession struct {
@@ -155,7 +158,7 @@ func parseAuthToken(raw []byte) (bool, *DeviceAuthToken, error) {
 	if err != nil {
 		return false, nil, err
 	}
-	if env.Code == deviceAuthPendingCode {
+	if env.Code == deviceAuthPendingCode || env.Code == deviceAuthLoginInProgress {
 		return true, nil, nil
 	}
 	if env.Code != 0 {

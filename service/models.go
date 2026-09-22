@@ -15,7 +15,7 @@ import (
 )
 
 type modelCache struct {
-	mu        sync.Mutex
+	mu        sync.RWMutex
 	expiresAt time.Time
 	items     []openaiModel
 }
@@ -42,13 +42,13 @@ func (p *Proxy) HandleModels(c *gin.Context) {
 }
 
 func (p *Proxy) listLiveModels(ctx context.Context) ([]openaiModel, error) {
-	liveModels.mu.Lock()
+	liveModels.mu.RLock()
 	if time.Now().Before(liveModels.expiresAt) && len(liveModels.items) > 0 {
 		items := append([]openaiModel(nil), liveModels.items...)
-		liveModels.mu.Unlock()
+		liveModels.mu.RUnlock()
 		return items, nil
 	}
-	liveModels.mu.Unlock()
+	liveModels.mu.RUnlock()
 
 	acc, err := p.rotator.Next(nil)
 	if err != nil {
