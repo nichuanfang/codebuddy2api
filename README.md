@@ -4,19 +4,21 @@
 
 > **面向用户的目标**：下载、解压、改两行配置、启动。运行时不需要安装 Go、gcc、Node.js、Python 或数据库。
 
-## 下载后只有三件东西
+## 下载后无需安装依赖
 
-每个发布包由 `make dist` 生成，并且只包含：
+每个 Windows 发布包由 `make dist` 生成，核心是三件文件，并额外带两个可选的 Windows 便捷脚本：
 
 ```text
-codebuddy-gateway.exe       # Windows 可执行文件（Linux/macOS 为对应无扩展名文件）
+codebuddy-gateway.exe       # Windows 可执行文件
 config.yaml                 # 日常配置：只改必要项
 config.reference.yaml       # 完整配置参考，通常不用改
+stop.ps1                    # 终止后台服务
+start-on-login.vbs          # 适合放进 Windows 启动目录
 ```
 
-程序会在当前目录自动创建 `data/` 和 `log/`。它们是运行数据，不属于发布包。
+运行时不需要安装 Go、gcc、Node.js、Python 或数据库。程序会在当前目录自动创建 `data/` 和 `log/`，它们是运行数据，不属于发布包。
 
-## 3 步启动
+## Windows 用户：直接双击即可
 
 1. 用记事本打开 `config.yaml`，至少修改：
 
@@ -30,22 +32,53 @@ config.reference.yaml       # 完整配置参考，通常不用改
    - `admin-key`：登录控制台和调用 `/admin/*` 使用的 Key。
    - 这两个 Key 只在本机网关使用，不是 CodeBuddy 账号密码。
 
-2. 启动：
+2. 双击 `codebuddy-gateway.exe`：
 
-   ```powershell
-   .\codebuddy-gateway.exe server
-   ```
+   - **首次运行 / 没有登录账号**：程序会提示即将打开登录页面，自动打开浏览器；完成 CodeBuddy 登录后会提示“登录成功”，随后自动启动后台服务。
+   - **已经登录过**：程序会直接启动后台服务，弹出启动成功提示，2 秒后自动关闭。
+   - 程序和提示窗口都不会留下需要手动关闭的命令行窗口。
 
-   Linux/macOS：
+3. 浏览器打开 `http://127.0.0.1:8088/`，用 `admin-key` 登录控制台。
 
-   ```bash
-   chmod +x ./codebuddy-gateway
-   ./codebuddy-gateway server
-   ```
+如果双击后没有反应，查看当前目录的 `log/desktop-login.log`、`log/gateway.stderr.log`。
 
-3. 浏览器打开 `http://127.0.0.1:8088/`，用 `admin-key` 登录，然后按页面提示完成 CodeBuddy 登录。
+### 手动命令行启动
+
+需要查看日志或调试时仍可使用：
+
+```powershell
+.\codebuddy-gateway.exe server
+```
+
+Linux/macOS：
+
+```bash
+chmod +x ./codebuddy-gateway
+./codebuddy-gateway server
+```
 
 默认监听 `127.0.0.1:8088`，只允许本机访问；如需局域网访问，再显式改为 `0.0.0.0:8088`，并关闭免密。
+
+
+## 停止服务与开机启动
+
+### 停止后台服务
+
+在程序目录打开 PowerShell：
+
+```powershell
+.\stop.ps1
+```
+
+脚本只会终止当前目录下的 `codebuddy-gateway.exe`，不会误杀其它同名程序。
+
+### 设置 Windows 登录后自动启动
+
+1. 按 `Win + R`，输入 `shell:startup` 并回车。
+2. 将 `start-on-login.vbs` 或它的快捷方式放入打开的启动目录；也可以直接复制脚本。
+3. 下次登录 Windows 后，脚本会隐藏启动网关：有登录态则直接运行，没有登录态则打开 CodeBuddy 登录流程。
+
+如需取消开机启动，从启动目录中删除该脚本或快捷方式即可。
 
 ## 免密模式
 
@@ -164,7 +197,7 @@ mingw32-make test
 mingw32-make dist
 ```
 
-`make dist` 会先清空 `dist/`，然后重新生成且只保留上面所列的三件东西，不会把 `.env`、数据库、日志或源码复制进去。
+`make dist` 会先清空 `dist/`，然后重新生成核心产物、配置和两个 Windows 便捷脚本，不会把 `.env`、数据库、日志或源码复制进去。
 
 可指定目标平台：
 
@@ -178,7 +211,7 @@ make dist GOOS=windows GOARCH=amd64 VERSION=v1.0.0
 仓库提供 `.github/workflows/release.yml`。在 GitHub Actions 中手动运行 **Release**，填写版本号（例如 `v1.0.0`），工作流会：
 
 1. 分别通过 Makefile 构建 Windows x64、Linux x64 产物；
-2. 每个压缩包只放可执行文件、`config.yaml`、`config.reference.yaml`；
+2. Windows 压缩包包含可执行文件、两个配置文件、`stop.ps1` 和 `start-on-login.vbs`；
 3. 创建或更新对应 GitHub Release，并上传压缩包。
 
 ## 安全提醒

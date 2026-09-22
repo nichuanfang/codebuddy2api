@@ -63,7 +63,13 @@ jobs:
         run: |
           test -f dist/config.yaml
           test -f dist/config.reference.yaml
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 5
+            test -f dist/stop.ps1
+            test -f dist/start-on-login.vbs
+          else
+            test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
+          fi
           test -n "$(find dist -maxdepth 1 -type f -name 'codebuddy-gateway*' -print -quit)"
 
       - name: Package

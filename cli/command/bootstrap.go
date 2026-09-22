@@ -27,3 +27,20 @@ func Bootstrap(cmd *cobra.Command) {
 		}
 	}
 }
+
+// HasAccounts 初始化配置和数据库，仅用于桌面启动入口判断是否需要首次登录。
+// 调用方会在进程结束前继续使用该数据库，或直接退出进程。
+func HasAccounts(configPath string) (bool, error) {
+	cmd := &cobra.Command{}
+	cmd.Flags().String("config", configPath, "")
+	cmd.Flags().String("api-key", "", "")
+	cmd.Flags().String("admin-key", "", "")
+	cmd.Flags().Bool("dev", false, "")
+	Bootstrap(cmd)
+	accounts, err := model.ListAccounts()
+	core.CloseDB()
+	if err != nil {
+		return false, err
+	}
+	return len(accounts) > 0, nil
+}
