@@ -90,6 +90,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
@@ -104,12 +107,12 @@ jobs:
           PRERELEASE: ${{ inputs.prerelease }}
         shell: bash
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release/*.zip --clobber
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" release/*.zip --clobber
           else
             args=("$TAG" release/*.zip --title "$TAG" --generate-notes)
             if [[ "$PRERELEASE" == "true" ]]; then
               args+=(--prerelease)
             fi
-            gh release create "${args[@]}"
+            gh release create "${args[@]}" --repo "$GITHUB_REPOSITORY"
           fi
