@@ -155,8 +155,13 @@ GATEWAY_PASSWORDLESS  覆盖 passwordless.enabled
 普通用户不需要执行本节。开发者需要 Go 1.25+、gcc（SQLite 使用 CGO）和 make：
 
 ```bash
+# Linux/macOS
 make test
 make dist
+
+# Windows（MinGW Make）
+mingw32-make test
+mingw32-make dist
 ```
 
 `make dist` 会先清空 `dist/`，然后重新生成且只保留上面所列的三件东西，不会把 `.env`、数据库、日志或源码复制进去。
