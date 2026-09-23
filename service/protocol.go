@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -289,11 +290,10 @@ func asString(v any) string {
 	case json.Number:
 		return t.String()
 	case float64:
-		if t == float64(int64(t)) {
-			return strings.TrimRight(strings.TrimRight(jsonNumber(t), "0"), ".")
-		}
-		b, _ := json.Marshal(t)
-		return string(b)
+		// Do not trim trailing zeroes from the whole JSON token: "10"
+		// would incorrectly become "1". FormatFloat preserves integral
+		// values and emits the shortest round-trippable representation.
+		return strconv.FormatFloat(t, 'f', -1, 64)
 	default:
 		return ""
 	}
