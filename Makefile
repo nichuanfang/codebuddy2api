@@ -4,8 +4,9 @@
 #   1. codebuddy-gateway(.exe)     可执行产物
 #   2. config.yaml                 只需修改必要项的配置
 #   3. config.reference.yaml       完整配置参考
-#   4. stop.ps1                    Windows 终止脚本
-#   5. start-on-login.vbs          Windows 开机/登录自启动脚本
+#   4. README.md                   简短使用说明
+#   5. stop.ps1                    Windows 终止脚本
+#   6. start-on-login.vbs          Windows 开机/登录自启动脚本
 #
 # 用户不需要安装 Go、gcc 或其它运行时依赖；这些只在从源码构建时需要。
 
@@ -49,7 +50,7 @@ else
 	@CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o "$(BINARY)" .
 endif
 ifeq ($(OS),Windows_NT)
-	@powershell -NoProfile -Command "Copy-Item -LiteralPath 'config.dist.yaml' -Destination '$(DIST)/config.yaml' -Force; Copy-Item -LiteralPath 'config.yaml.example' -Destination '$(DIST)/config.reference.yaml' -Force"
+	@powershell -NoProfile -Command "Copy-Item -LiteralPath 'config.dist.yaml' -Destination '$(DIST)/config.yaml' -Force; Copy-Item -LiteralPath 'config.yaml.example' -Destination '$(DIST)/config.reference.yaml' -Force; Copy-Item -LiteralPath 'README.dist.md' -Destination '$(DIST)/README.md' -Force"
 ifeq ($(GOOS),windows)
 	@powershell -NoProfile -Command "Copy-Item -LiteralPath 'stop.ps1' -Destination '$(DIST)/stop.ps1' -Force; Copy-Item -LiteralPath 'start-on-login.vbs' -Destination '$(DIST)/start-on-login.vbs' -Force"
 endif
