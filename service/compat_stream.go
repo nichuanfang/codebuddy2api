@@ -113,7 +113,10 @@ func applyChunkToAdapter(em streamAdapter, chunk map[string]any) {
 		if delta == nil {
 			continue
 		}
-		if s := deltaString(delta["reasoning_content"]); s != "" && global.CORE_CONFIG.Gateway.Passthrough {
+		// Responses and Anthropic expose reasoning/thinking as standard protocol
+		// output. It must not depend on passthrough, which only controls
+		// non-standard upstream fields and usage details.
+		if s := deltaString(delta["reasoning_content"]); s != "" {
 			em.onReasoning(s)
 		}
 		if s := deltaString(delta["content"]); s != "" {

@@ -141,7 +141,9 @@ func encodeResponsesJSON(result *ChatResult) ([]byte, error) {
 	}
 	id := ensureID(result.ID, "resp_")
 	output := make([]any, 0, 2+len(result.ToolCalls))
-	if global.CORE_CONFIG.Gateway.Passthrough && result.Reasoning != "" {
+	// Reasoning is a standard output item in the Responses API, so keep it
+	// visible even when passthrough is disabled.
+	if result.Reasoning != "" {
 		output = append(output, map[string]any{
 			"id":   newID("rs_"),
 			"type": "reasoning",
@@ -224,7 +226,9 @@ func encodeAnthropicJSON(result *ChatResult) ([]byte, error) {
 		result.Usage = &parsedUsage{}
 	}
 	content := make([]any, 0, 2+len(result.ToolCalls))
-	if global.CORE_CONFIG.Gateway.Passthrough && result.Reasoning != "" {
+	// Thinking is a standard content block in the Anthropic Messages API, so
+	// keep it visible even when passthrough is disabled.
+	if result.Reasoning != "" {
 		content = append(content, map[string]any{
 			"type":     "thinking",
 			"thinking": result.Reasoning,

@@ -771,6 +771,38 @@ func fmtString(v any) string {
 	return s
 }
 
+func TestResponsesReasoningVisibleWithoutPassthrough(t *testing.T) {
+	old := global.CORE_CONFIG.Gateway
+	global.CORE_CONFIG.Gateway.Passthrough = false
+	defer func() { global.CORE_CONFIG.Gateway = old }()
+
+	raw, err := encodeResponsesJSON(&ChatResult{
+		ID:        "resp_reasoning",
+		Model:     "glm-5.3",
+		Reasoning: "先检查输入，再给出答案。",
+		Content:   "答案",
+		Usage:     &parsedUsage{ThinkingTokens: 8},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(raw, &response); err != nil {
+		t.Fatal(err)
+	}
+	output, _ := response["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("expected reasoning and message output, got %v", output)
+	}
+	reasoning, _ := output[0].(map[string]any)
+	if reasoning["type"] != "reasoning" {
+		t.Fatalf("first output is not reasoning: %v", reasoning)
+	}
+	if !strings.Contains(string(raw), "先检查输入，再给出答案。") {
+		t.Fatalf("reasoning text was dropped: %s", raw)
+	}
+}
+
 func TestResponsesStreamApplyPatchEmitsCustomToolCall(t *testing.T) {
 	global.CORE_CONFIG.Gateway.Passthrough = true
 	patch := "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch"

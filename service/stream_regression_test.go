@@ -122,6 +122,33 @@ func TestResponsesPrematureEOFEmitsFailedNotCompleted(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamReasoningVisibleWithoutPassthrough(t *testing.T) {
+	old := global.CORE_CONFIG.Gateway
+	global.CORE_CONFIG.Gateway.Passthrough = false
+	defer func() { global.CORE_CONFIG.Gateway = old }()
+
+	var buf bytes.Buffer
+	ad := newStreamAdapter(ProtocolResponses, &buf, nil, "model")
+	ad.start()
+	applyChunkToAdapter(ad, map[string]any{
+		"choices": []any{map[string]any{
+			"delta": map[string]any{"reasoning_content": "visible reasoning"},
+		}},
+	})
+	applyChunkToAdapter(ad, map[string]any{
+		"choices": []any{map[string]any{
+			"delta": map[string]any{"content": "answer"},
+		}},
+	})
+	if err := ad.finish(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.String()
+	if !strings.Contains(raw, "response.reasoning_summary_text.delta") || !strings.Contains(raw, "visible reasoning") {
+		t.Fatalf("reasoning was dropped from Responses stream: %s", raw)
+	}
+}
+
 func TestWriteCompatStreamPrematureEOFEmitsProtocolFailure(t *testing.T) {
 	old := global.CORE_CONFIG.Gateway
 	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true, StreamIdleTimeoutSeconds: 1}
