@@ -15,11 +15,13 @@ import (
 	"go.uber.org/zap"
 )
 
-const unattendedRuntimeNote = `Runtime: keep calling tools until the user's request is fully finished. Do not stop after announcing the next step, and do not wait for the user to say continue. File edits must use apply_patch; it is available and working. Never write files with python, heredoc, or shell redirection.`
+const unattendedRuntimeNote = `Runtime: keep calling tools until the user's request is fully finished. Do not stop after announcing the next step, and do not wait for the user to say continue. Never finish a turn by only describing a tool call that you have not made.`
+
+const applyPatchRuntimeNote = `For file edits, use the apply_patch tool when it is present. Put the complete patch text in its input argument. Do not write files with python, heredoc, or shell redirection.`
 
 const modelExecutionNote = `Do not end a turn with a statement about an action you are about to take. If you say you will inspect, edit, run, rebuild, commit, or continue, call the corresponding tool in the same response. Only stop when the task is complete or a concrete blocker requires user input.`
 
-const toolNameExecutionNote = `Use only the exact tool names provided in the tool list. Do not add mcp__, server, or namespace prefixes to a tool name. If a tool is needed, call it now instead of describing the intended call.`
+const toolNameExecutionNote = `Use only the exact tool names provided in the tool list. Call a tool now instead of describing the intended call.`
 
 const applyPatchJSONHint = `When calling this tool, put the complete patch text in the "input" argument. The patch text must start with "*** Begin Patch" and end with "*** End Patch".`
 
@@ -40,6 +42,7 @@ func injectUnattendedRuntime(chat map[string]any) {
 	strict := requiresStrictExecution(model)
 	needRuntime, needStrict := true, strict
 	needToolNames := strict
+	needApplyPatch := chatHasApplyPatchTool(chat)
 	for _, raw := range msgs {
 		message, _ := raw.(map[string]any)
 		if message == nil || asString(message["role"]) != "system" {
@@ -55,8 +58,11 @@ func injectUnattendedRuntime(chat map[string]any) {
 		if strings.Contains(content, toolNameExecutionNote) {
 			needToolNames = false
 		}
+		if strings.Contains(content, applyPatchRuntimeNote) {
+			needApplyPatch = false
+		}
 	}
-	if !needRuntime && !needStrict && !needToolNames {
+	if !needRuntime && !needStrict && !needToolNames && !needApplyPatch {
 		chat["messages"] = msgs
 		return
 	}
@@ -70,6 +76,9 @@ func injectUnattendedRuntime(chat map[string]any) {
 	}
 	if needToolNames {
 		notes = append(notes, toolNameExecutionNote)
+	}
+	if needApplyPatch {
+		notes = append(notes, applyPatchRuntimeNote)
 	}
 	injected := strings.Join(notes, "\n\n")
 	if len(msgs) > 0 {
@@ -114,7 +123,7 @@ type executionPolicy struct {
 func policyForModel(model string) executionPolicy {
 	model = strings.ToLower(strings.TrimSpace(model))
 	switch {
-	case strings.Contains(model, "deepseek-v4.1-flash"):
+	case strings.Contains(model, "deepseek-"):
 		return executionPolicy{maxPreambleRetries: 2, strictPrompt: true}
 	case strings.HasPrefix(model, "glm-"):
 		return executionPolicy{maxPreambleRetries: 1, strictPrompt: true}
@@ -135,6 +144,21 @@ func chatHasCallableTools(chat map[string]any) bool {
 			continue
 		}
 		if fn, _ := m["function"].(map[string]any); fn != nil && strings.TrimSpace(asString(fn["name"])) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func chatHasApplyPatchTool(chat map[string]any) bool {
+	tools, _ := chat["tools"].([]any)
+	for _, item := range tools {
+		m, _ := item.(map[string]any)
+		if m == nil {
+			continue
+		}
+		fn, _ := m["function"].(map[string]any)
+		if fn != nil && isFreeformTool(asString(fn["name"])) {
 			return true
 		}
 	}

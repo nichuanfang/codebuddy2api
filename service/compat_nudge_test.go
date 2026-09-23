@@ -39,6 +39,8 @@ func TestPolicyForAgentModels(t *testing.T) {
 	}{
 		{"deepseek-v4.1-flash", 2, true},
 		{"deepseek-v4.1-flash-preview", 2, true},
+		{"deepseek-v4-pro", 2, true},
+		{"deepseek-v4-flash", 2, true},
 		{"glm-5.3", 1, true},
 		{"glm-5.2", 1, true},
 		{"kimi-k2.7-code", 1, false},
@@ -85,6 +87,29 @@ func TestInjectUnattendedRuntimeAddsStrictPromptForAgentModels(t *testing.T) {
 	}
 	if strings.Count(chat["messages"].([]any)[0].(map[string]any)["content"].(string), modelExecutionNote) != 1 {
 		t.Fatal("strict execution note was duplicated")
+	}
+}
+
+func TestInjectUnattendedRuntimeOnlyMentionsApplyPatchWhenAvailable(t *testing.T) {
+	withoutPatch := map[string]any{
+		"model":    "deepseek-v4-pro",
+		"messages": []any{map[string]any{"role": "user", "content": "查文档"}},
+		"tools":    []any{map[string]any{"function": map[string]any{"name": "query_docs"}}},
+	}
+	injectUnattendedRuntime(withoutPatch)
+	content := withoutPatch["messages"].([]any)[0].(map[string]any)["content"].(string)
+	if strings.Contains(content, "apply_patch") {
+		t.Fatalf("non-edit tool prompt mentioned apply_patch: %s", content)
+	}
+	withPatch := map[string]any{
+		"model":    "glm-5.3-flash",
+		"messages": []any{map[string]any{"role": "user", "content": "修改文件"}},
+		"tools":    []any{map[string]any{"function": map[string]any{"name": "apply_patch"}}},
+	}
+	injectUnattendedRuntime(withPatch)
+	content = withPatch["messages"].([]any)[0].(map[string]any)["content"].(string)
+	if !strings.Contains(content, applyPatchRuntimeNote) {
+		t.Fatalf("apply_patch prompt missing: %s", content)
 	}
 }
 
