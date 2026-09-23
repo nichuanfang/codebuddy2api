@@ -38,6 +38,8 @@ type toolStreamState struct {
 	itemID      string
 	callID      string
 	name        string
+	namespace   string
+	binding     *responseToolBinding
 	args        string
 	opened      bool
 	closed      bool
@@ -223,6 +225,7 @@ func (a *responsesAdapter) onReasoning(s string) {
 			"item": map[string]any{
 				"id":      a.reasoningItemID,
 				"type":    "reasoning",
+				"status":  "in_progress",
 				"summary": []any{},
 			},
 		})
@@ -338,11 +341,13 @@ func (a *responsesAdapter) onToolCall(tc AggregatedToolCall) {
 	if tc.Name != "" {
 		st.name = tc.Name
 	}
-	var binding *responseToolBinding
+	binding := st.binding
 	if a.registry != nil {
 		if b, ok := a.registry.ClientNameFor(st.name); ok {
 			binding = b
+			st.binding = b
 			st.name = b.ClientName
+			st.namespace, _ = applyClientNamespace(b, b.ClientName)
 		} else if st.name != "" {
 			if _, seen := a.unknownTools[toolNameKey(st.name)]; !seen {
 				a.unknownTools[toolNameKey(st.name)] = struct{}{}
@@ -384,16 +389,21 @@ func (a *responsesAdapter) openFunctionCall(st *toolStreamState) {
 		st.callID = newID("call_")
 	}
 	st.itemID = newID("fc_")
+	_, displayName := applyClientNamespace(st.binding, st.name)
+	item := map[string]any{
+		"id":        st.itemID,
+		"type":      "function_call",
+		"status":    "in_progress",
+		"call_id":   st.callID,
+		"name":      displayName,
+		"arguments": "",
+	}
+	if st.namespace != "" {
+		item["namespace"] = st.namespace
+	}
 	a.emit("response.output_item.added", map[string]any{
 		"output_index": st.outputIndex,
-		"item": map[string]any{
-			"id":        st.itemID,
-			"type":      "function_call",
-			"status":    "in_progress",
-			"call_id":   st.callID,
-			"name":      st.name,
-			"arguments": "",
-		},
+		"item":         item,
 	})
 	st.opened = true
 }
@@ -405,22 +415,28 @@ func (a *responsesAdapter) emitCustomToolCall(st *toolStreamState) {
 	if st.itemID == "" {
 		st.itemID = newID("ctc_")
 	}
-	var binding *responseToolBinding
-	if a.registry != nil {
+	binding := st.binding
+	if binding == nil && a.registry != nil {
 		binding, _ = a.registry.ClientNameFor(st.name)
+		st.binding = binding
 	}
 	input := unwrapCustomResponseArgs(st.args, binding)
 	st.args = input
+	_, displayName := applyClientNamespace(binding, st.name)
+	item := map[string]any{
+		"id":      st.itemID,
+		"type":    "custom_tool_call",
+		"status":  "in_progress",
+		"call_id": st.callID,
+		"name":    displayName,
+		"input":   "",
+	}
+	if namespace, _ := applyClientNamespace(binding, st.name); namespace != "" {
+		item["namespace"] = namespace
+	}
 	a.emit("response.output_item.added", map[string]any{
 		"output_index": st.outputIndex,
-		"item": map[string]any{
-			"id":      st.itemID,
-			"type":    "custom_tool_call",
-			"status":  "in_progress",
-			"call_id": st.callID,
-			"name":    st.name,
-			"input":   "",
-		},
+		"item":         item,
 	})
 	if input != "" {
 		a.emit("response.custom_tool_call_input.delta", map[string]any{
@@ -434,16 +450,20 @@ func (a *responsesAdapter) emitCustomToolCall(st *toolStreamState) {
 		"output_index": st.outputIndex,
 		"input":        input,
 	})
+	doneItem := map[string]any{
+		"id":      st.itemID,
+		"type":    "custom_tool_call",
+		"status":  "completed",
+		"call_id": st.callID,
+		"name":    displayName,
+		"input":   input,
+	}
+	if namespace, _ := applyClientNamespace(binding, st.name); namespace != "" {
+		doneItem["namespace"] = namespace
+	}
 	a.emit("response.output_item.done", map[string]any{
 		"output_index": st.outputIndex,
-		"item": map[string]any{
-			"id":      st.itemID,
-			"type":    "custom_tool_call",
-			"status":  "completed",
-			"call_id": st.callID,
-			"name":    st.name,
-			"input":   input,
-		},
+		"item":         doneItem,
 	})
 	a.toolSegments = append(a.toolSegments, cloneToolState(st))
 	st.closed = true
@@ -455,7 +475,11 @@ func (a *responsesAdapter) closeTools() {
 		if st == nil || st.closed {
 			continue
 		}
-		binding, _ := a.registry.ClientNameFor(st.name)
+		binding := st.binding
+		if binding == nil && a.registry != nil {
+			binding, _ = a.registry.ClientNameFor(st.name)
+			st.binding = binding
+		}
 		if (binding != nil && binding.Kind == responseToolCustom) || (binding == nil && isFreeformTool(st.name)) {
 			a.emitCustomToolCall(st)
 			continue
@@ -478,16 +502,21 @@ func (a *responsesAdapter) closeTools() {
 			"output_index": st.outputIndex,
 			"arguments":    st.args,
 		})
+		_, displayName := applyClientNamespace(st.binding, st.name)
+		item := map[string]any{
+			"id":        st.itemID,
+			"type":      "function_call",
+			"status":    "completed",
+			"call_id":   st.callID,
+			"name":      displayName,
+			"arguments": st.args,
+		}
+		if st.namespace != "" {
+			item["namespace"] = st.namespace
+		}
 		a.emit("response.output_item.done", map[string]any{
 			"output_index": st.outputIndex,
-			"item": map[string]any{
-				"id":        st.itemID,
-				"type":      "function_call",
-				"status":    "completed",
-				"call_id":   st.callID,
-				"name":      st.name,
-				"arguments": st.args,
-			},
+			"item":         item,
 		})
 		st.opened = false
 		st.closed = true
@@ -506,7 +535,7 @@ func (a *responsesAdapter) finish() error {
 	a.closeTools()
 	status := "completed"
 	eventType := "response.completed"
-	if a.finishReason == "length" {
+	if responsesFinishReasonIsLength(a.finishReason) {
 		status = "incomplete"
 		eventType = "response.incomplete"
 	}
@@ -570,7 +599,7 @@ func (a *responsesAdapter) full(status string) map[string]any {
 	entries := make([]outputEntry, 0, len(a.reasoningSegments)+len(a.textSegments)+len(a.toolSegments))
 	for _, segment := range a.reasoningSegments {
 		entries = append(entries, outputEntry{index: segment.index, item: map[string]any{
-			"id": segment.id, "type": "reasoning", "summary": []any{
+			"id": segment.id, "type": "reasoning", "status": "completed", "summary": []any{
 				map[string]any{"type": "summary_text", "text": segment.text},
 			},
 		}})
@@ -585,17 +614,30 @@ func (a *responsesAdapter) full(status string) map[string]any {
 		if st == nil {
 			continue
 		}
-		binding, _ := a.registry.ClientNameFor(st.name)
+		binding := st.binding
+		if binding == nil && a.registry != nil {
+			binding, _ = a.registry.ClientNameFor(st.name)
+			st.binding = binding
+		}
+		_, displayName := applyClientNamespace(binding, st.name)
 		if (binding != nil && binding.Kind == responseToolCustom) || (binding == nil && isFreeformTool(st.name)) {
-			entries = append(entries, outputEntry{index: st.outputIndex, item: map[string]any{
+			item := map[string]any{
 				"id": st.itemID, "type": "custom_tool_call", "status": "completed", "call_id": st.callID,
-				"name": st.name, "input": unwrapCustomResponseArgs(st.args, binding),
-			}})
+				"name": displayName, "input": unwrapCustomResponseArgs(st.args, binding),
+			}
+			if namespace, _ := applyClientNamespace(binding, st.name); namespace != "" {
+				item["namespace"] = namespace
+			}
+			entries = append(entries, outputEntry{index: st.outputIndex, item: item})
 		} else {
-			entries = append(entries, outputEntry{index: st.outputIndex, item: map[string]any{
+			item := map[string]any{
 				"id": st.itemID, "type": "function_call", "status": "completed", "call_id": st.callID,
-				"name": st.name, "arguments": st.args,
-			}})
+				"name": displayName, "arguments": st.args,
+			}
+			if st.namespace != "" {
+				item["namespace"] = st.namespace
+			}
+			entries = append(entries, outputEntry{index: st.outputIndex, item: item})
 		}
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].index < entries[j].index })
@@ -869,6 +911,7 @@ func (a *anthropicAdapter) fail(err error) error {
 }
 
 func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
+	requestID := propagateUpstreamRequestID(c, resp)
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
 	defer watchdog.stop()
 	result, err := collectSSEWithStart(resp.Body, meta.RequestedModel, start)
@@ -882,7 +925,7 @@ func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatR
 		return nil, wrapUpstreamStream(err)
 	}
 	if result.Usage != nil && result.Usage.RequestID == "" {
-		result.Usage.RequestID = resp.Header.Get("X-Request-Id")
+		result.Usage.RequestID = requestID
 	}
 	collector := NewCaptureCollector()
 	collector.Write(jsonResponseText(result))
@@ -911,6 +954,7 @@ func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatR
 }
 
 func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
+	reqID := propagateUpstreamRequestID(c, resp)
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -932,7 +976,6 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 	var firstTokenMs int64
 	var finishReason string
 	collector := NewCaptureCollector()
-	reqID := resp.Header.Get("X-Request-Id")
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
 	defer watchdog.stop()
 	stopHeartbeat := startSSEHeartbeat(sink)
@@ -1028,6 +1071,9 @@ func (s *sseSink) Write(p []byte) (int, error) {
 	if err == nil && n == len(clean) {
 		s.lastWrite.Store(time.Now().UnixNano())
 		return len(p), nil
+	}
+	if err == nil {
+		err = io.ErrShortWrite
 	}
 	return n, err
 }

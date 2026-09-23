@@ -10,7 +10,7 @@ import (
 )
 
 func PrepareResponsesBody(raw []byte) (*ChatRequestMeta, error) {
-	chat, toolRegistry, err := responsesToChatWithRegistry(raw)
+	chat, toolRegistry, downgradedTools, downgradedItems, err := responsesToChatWithRegistry(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -24,6 +24,8 @@ func PrepareResponsesBody(raw []byte) (*ChatRequestMeta, error) {
 	}
 	meta.Protocol = ProtocolResponses
 	meta.ToolRegistry = toolRegistry
+	meta.ResponsesDowngradedTools = downgradedTools
+	meta.ResponsesDowngradedItems = downgradedItems
 	return meta, nil
 }
 
@@ -100,27 +102,39 @@ func PrepareAnthropicBody(raw []byte) (*ChatRequestMeta, error) {
 }
 
 func responsesToChat(raw []byte) (map[string]any, error) {
-	chat, _, err := responsesToChatWithRegistry(raw)
+	chat, _, _, _, err := responsesToChatWithRegistry(raw)
 	return chat, err
 }
 
-func responsesToChatWithRegistry(raw []byte) (map[string]any, *responseToolRegistry, error) {
+func responsesToChatWithRegistry(raw []byte) (map[string]any, *responseToolRegistry, []string, []string, error) {
 	var src map[string]any
 	if err := json.Unmarshal(raw, &src); err != nil {
-		return nil, nil, fmt.Errorf("invalid json body")
+		return nil, nil, nil, nil, fmt.Errorf("invalid json body")
 	}
 	model, _ := src["model"].(string)
 	if strings.TrimSpace(model) == "" {
-		return nil, nil, fmt.Errorf("model is required")
+		return nil, nil, nil, nil, fmt.Errorf("model is required")
 	}
 	chat := map[string]any{"model": model}
+	// Responses defaults to non-streaming. PrepareChatBody defaults generic
+	// Chat requests to streaming, so make the Responses default explicit and
+	// reject a malformed stream value instead of silently changing semantics.
+	if rawStream, ok := src["stream"]; ok {
+		stream, valid := rawStream.(bool)
+		if !valid {
+			return nil, nil, nil, nil, fmt.Errorf("stream must be a boolean")
+		}
+		chat["stream"] = stream
+	} else {
+		chat["stream"] = false
+	}
 	copyChatFields(chat, src,
-		"stream", "temperature", "top_p", "user", "n", "stop", "metadata",
+		"temperature", "top_p", "user", "n", "stop", "metadata",
 		"frequency_penalty", "presence_penalty", "seed", "service_tier",
 		"logprobs", "top_logprobs", "stream_options",
 	)
 	if v, ok := src["max_output_tokens"]; ok {
-		chat["max_tokens"] = v
+		chat["max_tokens"] = normalizeResponsesMaxOutputTokens(v)
 	} else if v, ok := src["max_completion_tokens"]; ok {
 		chat["max_completion_tokens"] = v
 	} else if v, ok := src["max_tokens"]; ok {
@@ -131,35 +145,38 @@ func responsesToChatWithRegistry(raw []byte) (map[string]any, *responseToolRegis
 	if previousID := asString(src["previous_response_id"]); previousID != "" {
 		summary, ok := compactStateFor(previousID)
 		if !ok {
-			return nil, nil, fmt.Errorf("previous_response_id %q is not available in this gateway instance", previousID)
+			return nil, nil, nil, nil, fmt.Errorf("previous_response_id %q is not available in this gateway instance", previousID)
 		}
 		messages = append(messages, summarySystemMessage(summary))
 	}
 	if src["instructions"] != nil {
 		inst, err := convertChatContent(src["instructions"])
 		if err != nil {
-			return nil, nil, fmt.Errorf("instructions: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("instructions: %w", err)
 		}
 		if inst != nil && inst != "" {
 			messages = append(messages, map[string]any{"role": "system", "content": inst})
 		}
 	}
-	tools, toolRegistry := convertResponsesToolsWithRegistry(src["tools"])
-	convertedInput, err := convertResponsesInputWithRegistry(src["input"], toolRegistry)
+	tools, toolRegistry, downgradedTools := convertResponsesToolsWithRegistry(src["tools"])
+	convertedInput, downgradedItems, err := convertResponsesInputWithRegistryDiagnostics(src["input"], toolRegistry)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, downgradedTools, downgradedItems, err
 	}
 	messages = append(messages, convertedInput...)
 	messages = collapseSystemMessagesToHead(messages)
 	if len(messages) == 0 {
-		return nil, nil, fmt.Errorf("responses input must contain at least one message or tool result")
+		return nil, nil, downgradedTools, downgradedItems, fmt.Errorf("responses input must contain at least one message or tool result")
 	}
 	chat["messages"] = messages
 
 	if tools != nil {
 		chat["tools"] = tools
-		if tc := convertResponsesToolChoice(src["tool_choice"]); tc != nil {
+		if tc := convertResponsesToolChoice(src["tool_choice"], toolRegistry); tc != nil {
 			chat["tool_choice"] = tc
+		}
+		if isNamedResponsesToolChoice(src["tool_choice"]) {
+			appendUniqueString(&downgradedTools, "tool_choice")
 		}
 		if v, ok := src["parallel_tool_calls"]; ok {
 			chat["parallel_tool_calls"] = v
@@ -174,7 +191,25 @@ func responsesToChatWithRegistry(raw []byte) (map[string]any, *responseToolRegis
 		}
 	}
 	injectUnattendedRuntime(chat)
-	return chat, toolRegistry, nil
+	return chat, toolRegistry, downgradedTools, downgradedItems, nil
+}
+
+func normalizeResponsesMaxOutputTokens(v any) any {
+	switch n := v.(type) {
+	case float64:
+		if n > 0 && n < 16 {
+			return float64(16)
+		}
+	case json.Number:
+		if parsed, err := n.Int64(); err == nil && parsed > 0 && parsed < 16 {
+			return int64(16)
+		}
+	case int:
+		if n > 0 && n < 16 {
+			return 16
+		}
+	}
+	return v
 }
 
 func normalizeUpstreamRole(role string) string {
@@ -195,21 +230,27 @@ func convertResponsesInput(v any) ([]any, error) {
 }
 
 func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([]any, error) {
+	messages, _, err := convertResponsesInputWithRegistryDiagnostics(v, registry)
+	return messages, err
+}
+
+func convertResponsesInputWithRegistryDiagnostics(v any, registry *responseToolRegistry) ([]any, []string, error) {
+	downgraded := make([]string, 0)
 	if v == nil {
-		return nil, nil
+		return nil, downgraded, nil
 	}
 	if s, ok := v.(string); ok {
 		if s == "" {
-			return nil, nil
+			return nil, downgraded, nil
 		}
-		return []any{map[string]any{"role": "user", "content": s}}, nil
+		return []any{map[string]any{"role": "user", "content": s}}, downgraded, nil
 	}
 	arr, ok := v.([]any)
 	if !ok {
 		if m, ok := v.(map[string]any); ok {
 			arr = []any{m}
 		} else {
-			return nil, fmt.Errorf("responses input must be a string, object, or array")
+			return nil, downgraded, fmt.Errorf("responses input must be a string, object, or array")
 		}
 	}
 	messages := make([]any, 0, len(arr))
@@ -219,8 +260,6 @@ func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([
 		if len(pendingCalls) == 0 {
 			return
 		}
-		// Responses can emit assistant commentary immediately before one or more
-		// function calls. Chat Completions represents that as one assistant turn.
 		if len(messages) > 0 {
 			if previous, ok := messages[len(messages)-1].(map[string]any); ok &&
 				asString(previous["role"]) == "assistant" && previous["tool_calls"] == nil {
@@ -231,11 +270,7 @@ func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([
 				return
 			}
 		}
-		message := map[string]any{
-			"role":       "assistant",
-			"content":    nil,
-			"tool_calls": pendingCalls,
-		}
+		message := map[string]any{"role": "assistant", "content": nil, "tool_calls": pendingCalls}
 		attachReasoningContent(message, pendingReasoning)
 		messages = append(messages, message)
 		pendingCalls = nil
@@ -249,9 +284,9 @@ func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([
 		}
 		m, _ := item.(map[string]any)
 		if m == nil {
-			return nil, fmt.Errorf("responses input items must be objects")
+			return nil, downgraded, fmt.Errorf("responses input items must be objects")
 		}
-		typ := asString(m["type"])
+		typ := strings.ToLower(strings.TrimSpace(asString(m["type"])))
 		role := asString(m["role"])
 		switch typ {
 		case "function_call", "custom_tool_call":
@@ -262,15 +297,14 @@ func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([
 			if callID == "" {
 				callID = asString(m["tool_use_id"])
 			}
+			if callID == "" {
+				return nil, downgraded, fmt.Errorf("Responses tool output of type %q requires call_id", typ)
+			}
 			content, err := convertChatContent(firstNonNil(m["output"], m["content"]))
 			if err != nil {
-				return nil, err
+				return nil, downgraded, err
 			}
-			messages = append(messages, map[string]any{
-				"role":         "tool",
-				"tool_call_id": callID,
-				"content":      content,
-			})
+			messages = append(messages, map[string]any{"role": "tool", "tool_call_id": callID, "content": content})
 		case "reasoning":
 			if text := responsesReasoningText(m); text != "" {
 				pendingReasoning = append(pendingReasoning, text)
@@ -279,29 +313,45 @@ func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([
 			flushCalls()
 			summary, err := compactionSummaryFromItem(m)
 			if err != nil {
-				return nil, err
+				return nil, downgraded, err
 			}
-			// The official compact response contains both a human-readable
-			// summary message and a compaction item. Keep only the system
-			// summary when the client sends both back, avoiding duplicate tokens.
 			if len(messages) > 0 {
 				if previous, ok := messages[len(messages)-1].(map[string]any); ok &&
-					asString(previous["role"]) == "user" &&
-					strings.TrimSpace(messageText(previous["content"])) == summary {
+					asString(previous["role"]) == "user" && strings.TrimSpace(messageText(previous["content"])) == summary {
 					messages = messages[:len(messages)-1]
 				}
 			}
 			messages = append(messages, summarySystemMessage(summary))
 		case "item_reference":
-			// References require server-side conversation state, which this Chat
-			// bridge does not have. Codex normally sends the expanded history.
+			// References require server-side state, which this bridge deliberately does not own.
 			continue
-		default:
+		case "", "message":
 			flushCalls()
+		default:
+			if isResponsesHostedOutputType(typ) {
+				flushCalls()
+				content, err := convertHostedHistoryOutput(firstNonNil(m["output"], m["content"], m["result"]))
+				if err != nil {
+					return nil, downgraded, err
+				}
+				if content == nil || content == "" {
+					content = compactHostedHistoryItem(m)
+				}
+				messages = append(messages, map[string]any{"role": "user", "content": content})
+				appendUniqueString(&downgraded, typ)
+				continue
+			}
+			if isResponsesHostedCallType(typ) {
+				appendUniqueString(&downgraded, typ)
+				continue
+			}
+			return nil, downgraded, fmt.Errorf("unsupported Responses input item type %q", typ)
+		}
+		if typ == "" || typ == "message" {
 			role = normalizeUpstreamRole(role)
 			content, err := convertChatContent(m["content"])
 			if err != nil {
-				return nil, err
+				return nil, downgraded, err
 			}
 			if content == nil || content == "" {
 				if text := asString(m["text"]); text != "" {
@@ -312,8 +362,6 @@ func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([
 			if role == "assistant" {
 				attachReasoningContent(message, pendingReasoning)
 			}
-			// Reasoning belongs only to the current assistant turn. A user/system
-			// boundary must not leak stale reasoning into a later assistant turn.
 			pendingReasoning = nil
 			messages = append(messages, message)
 		}
@@ -329,7 +377,64 @@ func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([
 			}
 		}
 	}
-	return messages, nil
+	return messages, downgraded, nil
+}
+
+func isResponsesHostedCallType(typ string) bool {
+	switch typ {
+	case "web_search_call", "file_search_call", "computer_call", "tool_search_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func isResponsesHostedOutputType(typ string) bool {
+	switch typ {
+	case "web_search_call_output", "file_search_call_output", "computer_call_output", "tool_search_call_output":
+		return true
+	default:
+		return false
+	}
+}
+
+func convertHostedHistoryOutput(v any) (any, error) {
+	if v == nil {
+		return nil, nil
+	}
+	if m, ok := v.(map[string]any); ok {
+		typ := strings.ToLower(strings.TrimSpace(asString(m["type"])))
+		if typ == "computer_screenshot" {
+			copy := cloneToolMap(m)
+			copy["type"] = "input_image"
+			return convertChatContent(copy)
+		}
+		if typ == "input_image" || typ == "image_url" {
+			return convertChatContent(m)
+		}
+	}
+	if s, ok := v.(string); ok {
+		return s, nil
+	}
+	if content, err := convertChatContent(v); err == nil {
+		return content, nil
+	}
+	return mustJSON(v), nil
+}
+
+func compactHostedHistoryItem(m map[string]any) string {
+	if m == nil {
+		return "[hosted tool output unavailable]"
+	}
+	copyItem := cloneToolMap(m)
+	delete(copyItem, "id")
+	delete(copyItem, "call_id")
+	delete(copyItem, "status")
+	encoded, err := json.Marshal(copyItem)
+	if err != nil {
+		return "[hosted tool output unavailable]"
+	}
+	return "[hosted tool output] " + string(encoded)
 }
 
 func responsesReasoningText(item map[string]any) string {
@@ -401,9 +506,10 @@ func responsesFunctionCallToToolCall(m map[string]any, registry *responseToolReg
 		id = asString(m["id"])
 	}
 	name := asString(m["name"])
+	namespace := asString(m["namespace"])
 	var binding *responseToolBinding
 	if registry != nil {
-		name, binding = registry.UpstreamNameFor(name)
+		name, binding = registry.UpstreamNameForClientCall(namespace, name)
 	}
 	args := asString(m["arguments"])
 	if args == "" {
@@ -505,6 +611,9 @@ func convertChatContent(v any) (any, error) {
 		switch typ {
 		case "input_text", "output_text", "text", "summary_text":
 			t := asString(m["text"])
+			if typ == "output_text" {
+				t = appendResponsesAnnotations(t, m["annotations"])
+			}
 			text.WriteString(t)
 			parts = append(parts, map[string]any{"type": "text", "text": t})
 		case "input_image", "image_url", "image":
@@ -514,6 +623,8 @@ func convertChatContent(v any) (any, error) {
 			}
 			onlyText = false
 			parts = append(parts, image)
+		case "input_file", "file":
+			return nil, fmt.Errorf("content block type %q is not supported by CodeBuddy Chat upstream", typ)
 		default:
 			return nil, fmt.Errorf("unsupported content block type %q", typ)
 		}
@@ -522,6 +633,41 @@ func convertChatContent(v any) (any, error) {
 		return text.String(), nil
 	}
 	return parts, nil
+}
+
+func appendResponsesAnnotations(text string, raw any) string {
+	annotations, _ := raw.([]any)
+	if len(annotations) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.WriteString(text)
+	seen := make(map[string]struct{})
+	for _, item := range annotations {
+		m, _ := item.(map[string]any)
+		if m == nil || asString(m["type"]) != "url_citation" {
+			continue
+		}
+		url := strings.TrimSpace(asString(m["url"]))
+		lowerURL := strings.ToLower(url)
+		if url == "" || (!strings.HasPrefix(lowerURL, "http://") && !strings.HasPrefix(lowerURL, "https://")) {
+			continue
+		}
+		if _, ok := seen[url]; ok {
+			continue
+		}
+		seen[url] = struct{}{}
+		title := strings.TrimSpace(asString(m["title"]))
+		if title == "" {
+			title = url
+		}
+		b.WriteString("\n[Source: ")
+		b.WriteString(title)
+		b.WriteString("](")
+		b.WriteString(url)
+		b.WriteString(")")
+	}
+	return b.String()
 }
 
 func chatImagePart(m map[string]any, typ string) (map[string]any, error) {
@@ -620,17 +766,18 @@ func validateBase64(value string) error {
 	return err
 }
 
-func convertResponsesToolsWithRegistry(v any) (any, *responseToolRegistry) {
+func convertResponsesToolsWithRegistry(v any) (any, *responseToolRegistry, []string) {
 	arr, ok := v.([]any)
 	if !ok || len(arr) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	candidates := make([]responseToolCandidate, 0, len(arr))
+	downgraded := make([]string, 0)
 	for _, item := range arr {
-		collectResponseToolCandidates(item, "", &candidates)
+		collectResponseToolCandidates(item, "", "", &candidates, &downgraded)
 	}
 	if len(candidates) == 0 {
-		return nil, nil
+		return nil, nil, downgraded
 	}
 	registry := newResponseToolRegistry(candidates)
 	out := make([]any, 0, len(candidates))
@@ -658,9 +805,9 @@ func convertResponsesToolsWithRegistry(v any) (any, *responseToolRegistry) {
 		out = append(out, tool)
 	}
 	if len(out) == 0 {
-		return nil, nil
+		return nil, nil, downgraded
 	}
-	return out, registry
+	return out, registry, downgraded
 }
 
 type responseToolCandidate struct {
@@ -669,6 +816,9 @@ type responseToolCandidate struct {
 	QualifiedName string
 	Kind          string
 	InputField    string
+	// Namespace is the codex-facing namespace for MCP/namespace tools,
+	// e.g. "mcp__context7". Empty for plain functions and custom tools.
+	Namespace string
 }
 
 const (
@@ -676,7 +826,7 @@ const (
 	responseToolCustom   = "custom"
 )
 
-func collectResponseToolCandidates(item any, prefix string, out *[]responseToolCandidate) {
+func collectResponseToolCandidates(item any, prefix, namespace string, out *[]responseToolCandidate, downgraded *[]string) {
 	m, _ := item.(map[string]any)
 	if m == nil {
 		return
@@ -685,7 +835,11 @@ func collectResponseToolCandidates(item any, prefix string, out *[]responseToolC
 		name := asString(fn["name"])
 		if name != "" {
 			qualified := joinToolName(prefix, name)
-			*out = append(*out, responseToolCandidate{Raw: m, ClientName: name, QualifiedName: qualified, Kind: responseToolFunction})
+			candidateNamespace := namespace
+			if candidateNamespace == "" {
+				candidateNamespace = normalizeMCPNamespace(asString(m["namespace"]))
+			}
+			*out = append(*out, responseToolCandidate{Raw: m, ClientName: name, QualifiedName: qualified, Kind: responseToolFunction, Namespace: candidateNamespace})
 		}
 		return
 	}
@@ -694,9 +848,10 @@ func collectResponseToolCandidates(item any, prefix string, out *[]responseToolC
 	case "namespace":
 		name := asString(m["name"])
 		childPrefix := joinToolName(prefix, name)
+		namespace := mcpNamespaceFor(prefix, name)
 		nested, _ := m["tools"].([]any)
 		for _, child := range nested {
-			collectResponseToolCandidates(child, childPrefix, out)
+			collectResponseToolCandidates(child, childPrefix, namespace, out, downgraded)
 		}
 	case "custom", "function", "":
 		name := asString(m["name"])
@@ -709,11 +864,52 @@ func collectResponseToolCandidates(item any, prefix string, out *[]responseToolC
 			kind = responseToolCustom
 			inputField = customToolInputField(name)
 		}
+		candidateNamespace := namespace
+		if candidateNamespace == "" {
+			candidateNamespace = normalizeMCPNamespace(asString(m["namespace"]))
+		}
 		*out = append(*out, responseToolCandidate{
 			Raw: m, ClientName: name, QualifiedName: joinToolName(prefix, name),
-			Kind: kind, InputField: inputField,
+			Kind: kind, InputField: inputField, Namespace: candidateNamespace,
 		})
+	default:
+		// Responses hosted tools are not executable by the CodeBuddy Chat upstream.
+		if typ != "" {
+			appendUniqueString(downgraded, typ)
+		}
+		return
 	}
+}
+
+// mcpNamespaceFor builds the Codex-facing namespace for a namespace tool.
+// Codex registers MCP tools as `mcp__<server>__<tool>`; nested namespace
+// groups are joined with "__" so the runtime can still resolve them.
+func mcpNamespaceFor(prefix, name string) string {
+	return normalizeMCPNamespace(joinToolName(prefix, name))
+}
+
+func normalizeMCPNamespace(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(name), "mcp__") {
+		return name
+	}
+	return "mcp__" + name
+}
+
+func appendUniqueString(items *[]string, value string) {
+	if items == nil || strings.TrimSpace(value) == "" {
+		return
+	}
+	value = strings.TrimSpace(value)
+	for _, existing := range *items {
+		if existing == value {
+			return
+		}
+	}
+	*items = append(*items, value)
 }
 
 func joinToolName(prefix, name string) string {
@@ -754,11 +950,23 @@ func ensureCustomJSONArgs(args, field string) string {
 	}
 	var obj map[string]any
 	if json.Unmarshal([]byte(s), &obj) == nil {
-		if _, ok := obj[field]; ok {
-			return s
+		for _, candidate := range customInputFields(field) {
+			if value, ok := obj[candidate]; ok {
+				if candidate == field {
+					return s
+				}
+				return mustJSON(map[string]any{field: value})
+			}
 		}
 	}
 	return mustJSON(map[string]string{field: args})
+}
+
+func customInputFields(field string) []string {
+	if field == "cmd" {
+		return []string{"cmd", "input", "command"}
+	}
+	return []string{field}
 }
 
 func functionToolFromMap(m map[string]any, prefix string) map[string]any {
@@ -772,6 +980,9 @@ func functionToolFromMap(m map[string]any, prefix string) map[string]any {
 	fn := map[string]any{"name": name}
 	if d, ok := m["description"]; ok {
 		fn["description"] = d
+	}
+	if strict, ok := m["strict"]; ok {
+		fn["strict"] = strict
 	}
 	parameters := m["parameters"]
 	if parameters == nil {
@@ -839,28 +1050,84 @@ func customToolToFunction(m map[string]any, prefix string) map[string]any {
 	return map[string]any{"type": "function", "function": fn}
 }
 
-func convertResponsesToolChoice(v any) any {
+func isNamedResponsesToolChoice(v any) bool {
+	if s, ok := v.(string); ok {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "auto", "none", "required", "":
+			return false
+		default:
+			return true
+		}
+	}
+	m, _ := v.(map[string]any)
+	if m == nil {
+		return false
+	}
+	if _, ok := m["function"].(map[string]any); ok {
+		return true
+	}
+	return strings.EqualFold(asString(m["type"]), "function")
+}
+
+func convertResponsesToolChoice(v any, registry *responseToolRegistry) any {
 	if v == nil {
 		return nil
 	}
 	if s, ok := v.(string); ok {
-		return s
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "auto", "none", "required":
+			return s
+		}
+		if registry == nil {
+			return nil
+		}
+		_, binding := registry.UpstreamNameForClientCall("", s)
+		if binding == nil {
+			return nil
+		}
+		// CodeBuddy's chat request schema currently accepts only the string
+		// forms auto/none/required, not OpenAI's named-function object form.
+		return "required"
 	}
 	m, ok := v.(map[string]any)
 	if !ok {
 		return v
 	}
-	if _, ok := m["function"]; ok {
-		return m
+	if fn, ok := m["function"].(map[string]any); ok {
+		copyChoice := cloneToolMap(m)
+		copyFn := cloneToolMap(fn)
+		if registry != nil {
+			namespace := asString(copyChoice["namespace"])
+			if namespace == "" {
+				namespace = asString(copyFn["namespace"])
+			}
+			_, binding := registry.UpstreamNameForClientCall(namespace, asString(copyFn["name"]))
+			if binding == nil {
+				return nil
+			}
+			// The upstream schema cannot select a named function; require a
+			// tool call and let the model choose among the registered tools.
+			return "required"
+		}
+		copyChoice["function"] = copyFn
+		return copyChoice
 	}
 	typ := asString(m["type"])
 	switch typ {
 	case "auto", "none", "required":
 		return typ
 	case "function":
+		name := asString(m["name"])
+		if registry != nil {
+			_, binding := registry.UpstreamNameForClientCall(asString(m["namespace"]), name)
+			if binding == nil {
+				return nil
+			}
+			return "required"
+		}
 		return map[string]any{
 			"type":     "function",
-			"function": map[string]any{"name": asString(m["name"])},
+			"function": map[string]any{"name": name},
 		}
 	default:
 		return v

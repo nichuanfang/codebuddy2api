@@ -3,12 +3,38 @@ package service
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"codebuddy-gateway/config"
 	"codebuddy-gateway/global"
 )
+
+func TestResponsesDefaultsToNonStreaming(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{"model":"glm-5.3","input":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ClientStream {
+		t.Fatal("Responses stream must default to false")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["stream"] != true {
+		t.Fatal("upstream must still use SSE internally")
+	}
+}
+
+func TestResponsesRejectsMalformedStreamFlag(t *testing.T) {
+	_, err := PrepareResponsesBody([]byte(`{"model":"glm-5.3","input":"hello","stream":"false"}`))
+	if err == nil || !strings.Contains(err.Error(), "stream must be a boolean") {
+		t.Fatalf("err=%v", err)
+	}
+}
 
 func TestPrepareResponsesBody(t *testing.T) {
 	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
@@ -114,14 +140,16 @@ func TestResponsesCoalescesAssistantToolCallAndPreservesReasoning(t *testing.T) 
 	}
 }
 
-func TestResponsesDropsToolControlsWhenNoToolsRemain(t *testing.T) {
+func TestResponsesIgnoresUnsupportedToolTypes(t *testing.T) {
 	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
 	meta, err := PrepareResponsesBody([]byte(`{
 		"model":"glm-5.3",
 		"input":"hi",
-		"tools":[{"type":"web_search"}],
-		"tool_choice":"auto",
-		"parallel_tool_calls":true
+		"tools":[
+			{"type":"function","name":"ping","parameters":{"type":"object"}},
+			{"type":"web_search"},
+			{"type":"mcp"}
+		]
 	}`))
 	if err != nil {
 		t.Fatal(err)
@@ -130,14 +158,31 @@ func TestResponsesDropsToolControlsWhenNoToolsRemain(t *testing.T) {
 	if err := json.Unmarshal(meta.Body, &body); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := body["tools"]; ok {
-		t.Fatalf("unsupported tools should be dropped: %v", body["tools"])
+	tools := body["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("unsupported tools were not filtered: %v", tools)
 	}
-	if _, ok := body["tool_choice"]; ok {
-		t.Fatalf("tool_choice without tools should be dropped: %v", body["tool_choice"])
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "ping" {
+		t.Fatalf("tools=%v", tools)
 	}
-	if _, ok := body["parallel_tool_calls"]; ok {
-		t.Fatalf("parallel_tool_calls without tools should be dropped: %v", body["parallel_tool_calls"])
+}
+
+func TestResponsesRejectsUnsupportedInputItems(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	for _, typ := range []string{"mcp_call"} {
+		_, err := PrepareResponsesBody([]byte(`{"model":"deepseek-v4-pro","input":[{"type":"` + typ + `"}]}`))
+		if err == nil || !strings.Contains(err.Error(), `unsupported Responses input item type "`+typ+`"`) {
+			t.Fatalf("type=%s error=%v", typ, err)
+		}
+	}
+}
+
+func TestResponsesRejectsToolOutputWithoutCallID(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	_, err := PrepareResponsesBody([]byte(`{"model":"glm-5.3","input":[{"type":"function_call_output","output":"ok"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "requires call_id") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -605,8 +650,7 @@ func TestConvertNamespaceAndCustomTools(t *testing.T) {
 			{"type":"custom","name":"exec","description":"run command","format":{"type":"grammar"}},
 			{"type":"namespace","name":"multi_agent_v1","tools":[
 				{"type":"function","name":"spawn_agent","description":"spawn","parameters":{"type":"object"}}
-			]},
-			{"type":"web_search"}
+			]}
 		]
 	}`))
 	if err != nil {
@@ -661,6 +705,70 @@ func TestResponseToolRegistryNormalizesMCPAliases(t *testing.T) {
 	}
 }
 
+func TestResponsesToolChoiceDowngradesNamedMCPChoice(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"deepseek-v4-pro",
+		"input":"lookup",
+		"tools":[{"type":"namespace","name":"context7","tools":[{"type":"function","name":"resolve_library_id","parameters":{"type":"object"}}]}],
+		"tool_choice":{"type":"function","name":"mcp__context7__resolve_library_id"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["tool_choice"] != "required" {
+		t.Fatalf("tool_choice=%v", body["tool_choice"])
+	}
+}
+
+func TestCustomToolArgumentsAcceptExecAliases(t *testing.T) {
+	for _, input := range []string{
+		`{"cmd":"Get-ChildItem"}`,
+		`{"input":"Get-ChildItem"}`,
+		`{"command":"Get-ChildItem"}`,
+	} {
+		got := ensureCustomJSONArgs(input, "cmd")
+		var obj map[string]string
+		if err := json.Unmarshal([]byte(got), &obj); err != nil || obj["cmd"] != "Get-ChildItem" {
+			t.Fatalf("input=%s got=%s obj=%v err=%v", input, got, obj, err)
+		}
+	}
+	if got := unwrapJSONField(`{"input":"Get-ChildItem"}`, "cmd"); got != "Get-ChildItem" {
+		t.Fatalf("unwrap input alias=%q", got)
+	}
+	if got := unwrapJSONField(`{"command":"Get-ChildItem"}`, "cmd"); got != "Get-ChildItem" {
+		t.Fatalf("unwrap command alias=%q", got)
+	}
+}
+
+func TestFunctionToolStrictSchemaIsPreserved(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3-flash",
+		"input":"validate",
+		"tools":[{"type":"function","name":"validate","strict":true,"parameters":{"type":"object","additionalProperties":false,"properties":{"value":{"type":"string"}},"required":["value"]}}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	fn := body["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if fn["strict"] != true {
+		t.Fatalf("strict=%v", fn["strict"])
+	}
+	params := fn["parameters"].(map[string]any)
+	if params["additionalProperties"] != false || len(params["required"].([]any)) != 1 {
+		t.Fatalf("parameters=%v", params)
+	}
+}
+
 func TestResponseToolRegistryUsesQualifiedNamesOnCollision(t *testing.T) {
 	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
 	meta, err := PrepareResponsesBody([]byte(`{
@@ -685,6 +793,20 @@ func TestResponseToolRegistryUsesQualifiedNamesOnCollision(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "one__lookup,two__lookup" {
 		t.Fatalf("qualified names=%v", got)
+	}
+	registry := meta.ToolRegistry
+	if registry == nil {
+		t.Fatal("expected registry")
+	}
+	// The Codex runtime dispatches namespaced MCP tools on the
+	// namespace/leaf pair, so both servers must stay addressable.
+	first, ok := registry.ClientNameFor("one__lookup")
+	if !ok || first.ClientNamespace != "mcp__one" || first.ClientLeafName != "lookup" {
+		t.Fatalf("first binding=%+v ok=%v", first, ok)
+	}
+	second, ok := registry.ClientNameFor("two__lookup")
+	if !ok || second.ClientNamespace != "mcp__two" || second.ClientLeafName != "lookup" {
+		t.Fatalf("second binding=%+v ok=%v", second, ok)
 	}
 }
 
@@ -969,12 +1091,12 @@ func TestResponsesStreamApplyPatchEmitsCustomToolCall(t *testing.T) {
 
 func TestResponsesStreamRegistryNormalizesMCPToolName(t *testing.T) {
 	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
-	tools, registry := convertResponsesToolsWithRegistry([]any{
+	tools, registry, downgraded := convertResponsesToolsWithRegistry([]any{
 		map[string]any{"type": "namespace", "name": "context7", "tools": []any{
 			map[string]any{"type": "function", "name": "resolve_library_id", "parameters": map[string]any{"type": "object"}},
 		}},
 	})
-	if tools == nil || registry == nil {
+	if tools == nil || registry == nil || len(downgraded) != 0 {
 		t.Fatal("expected converted tools and registry")
 	}
 	var buf bytes.Buffer
@@ -991,6 +1113,212 @@ func TestResponsesStreamRegistryNormalizesMCPToolName(t *testing.T) {
 	}
 	if strings.Contains(raw, "mcp__context7__resolve_library_id") {
 		t.Fatalf("upstream alias leaked into stream=%s", raw)
+	}
+}
+
+func TestResponsesMCPCallUsesCodexNamespace(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	tools, registry, _ := convertResponsesToolsWithRegistry([]any{
+		map[string]any{"type": "namespace", "name": "context7", "tools": []any{
+			map[string]any{"type": "function", "name": "resolve_library_id", "parameters": map[string]any{"type": "object"}},
+		}},
+	})
+	if tools == nil || registry == nil {
+		t.Fatal("expected converted tools and registry")
+	}
+
+	// JSON path: Codex must receive namespace + leaf name, never the bare leaf.
+	result := &ChatResult{
+		Content: "ok",
+		ToolCalls: []AggregatedToolCall{{
+			Index: 0, ID: "call_ctx", Name: "resolve_library_id",
+			Arguments: `{"libraryName":"Spring Boot"}`,
+		}},
+		Usage: &parsedUsage{},
+	}
+	raw, err := encodeResponsesJSONWithRegistry(result, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatal(err)
+	}
+	output := resp["output"].([]any)
+	var call map[string]any
+	for _, item := range output {
+		if m, ok := item.(map[string]any); ok && m["type"] == "function_call" {
+			call = m
+		}
+	}
+	if call == nil {
+		t.Fatalf("no function_call in %s", raw)
+	}
+	if call["namespace"] != "mcp__context7" || call["name"] != "resolve_library_id" {
+		t.Fatalf("call namespace/name = %v/%v raw=%s", call["namespace"], call["name"], raw)
+	}
+
+	// Stream path: the namespace must survive into added/done events and the
+	// terminal response payload.
+	var buf bytes.Buffer
+	ad := newStreamAdapterWithRegistry(ProtocolResponses, &buf, nil, "deepseek-v4.1-flash", registry)
+	ad.start()
+	ad.onToolCall(AggregatedToolCall{Index: 0, ID: "call_ctx", Name: "resolve_library_id", Arguments: `{"libraryName":"Spring Boot"}`})
+	ad.onFinishReason("tool_calls")
+	if err := ad.finish(); err != nil {
+		t.Fatal(err)
+	}
+	stream := buf.String()
+	if !strings.Contains(stream, `"namespace":"mcp__context7"`) {
+		t.Fatalf("stream lost namespace: %s", stream)
+	}
+	if strings.Count(stream, `"name":"resolve_library_id"`) < 2 {
+		t.Fatalf("stream missing leaf name: %s", stream)
+	}
+}
+func TestResponsesNamespacedCollisionUsesNamespaceOnInput(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"lookup"}]},
+			{"type":"function_call","name":"lookup","namespace":"mcp__two","call_id":"call_two","arguments":"{}"}
+		],
+		"tools":[
+			{"type":"namespace","name":"one","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]},
+			{"type":"namespace","name":"two","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	var fn map[string]any
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		calls, _ := message["tool_calls"].([]any)
+		if len(calls) == 0 {
+			continue
+		}
+		call := calls[0].(map[string]any)
+		fn, _ = call["function"].(map[string]any)
+		break
+	}
+	if fn == nil || fn["name"] != "two__lookup" {
+		t.Fatalf("namespace-qualified upstream name=%v body=%s", fn, meta.Body)
+	}
+}
+
+func TestResponsesNamespacedWrappedFunctionKeepsNamespace(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":"lookup",
+		"tools":[{"type":"namespace","name":"context7","tools":[{"type":"function","function":{"name":"resolve_library_id","parameters":{"type":"object"}}}]}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.ToolRegistry == nil {
+		t.Fatal("expected registry")
+	}
+	binding, ok := meta.ToolRegistry.ClientNameFor("context7__resolve_library_id")
+	if !ok || binding.ClientNamespace != "mcp__context7" {
+		t.Fatalf("binding=%+v ok=%v", binding, ok)
+	}
+}
+
+func TestResponsesCustomMCPOutputKeepsNamespace(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	_, registry, _ := convertResponsesToolsWithRegistry([]any{
+		map[string]any{"type": "namespace", "name": "tools", "tools": []any{
+			map[string]any{"type": "custom", "name": "apply_patch", "description": "patch"},
+		}},
+	})
+	result := &ChatResult{
+		ToolCalls: []AggregatedToolCall{{Index: 0, ID: "call_patch", Name: "tools__apply_patch", Arguments: `{"input":"*** Begin Patch\n*** End Patch"}`}},
+		Usage:     &parsedUsage{},
+	}
+	raw, err := encodeResponsesJSONWithRegistry(result, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"type":"custom_tool_call"`) || !strings.Contains(string(raw), `"namespace":"mcp__tools"`) {
+		t.Fatalf("custom output lost namespace: %s", raw)
+	}
+}
+
+func TestResponsesHostedHistoryDowngradesAndPreservesCitations(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":[
+			{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"latest Go release"}},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Go is actively maintained.","annotations":[{"type":"url_citation","url":"https://go.dev","title":"Go"}]}]},
+			{"type":"computer_call_output","call_id":"cc_1","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AA=="}}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.ResponsesDowngradedItems) != 2 {
+		t.Fatalf("downgraded items=%v", meta.ResponsesDowngradedItems)
+	}
+	messages := body["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("messages=%v", messages)
+	}
+	if !strings.Contains(asString(messages[0].(map[string]any)["content"]), "https://go.dev") {
+		t.Fatalf("citation was lost: %v", messages[0])
+	}
+	if !strings.Contains(fmt.Sprintf("%v", messages[1].(map[string]any)["content"]), "image_url") {
+		t.Fatalf("hosted output was not preserved: %v", messages[1])
+	}
+}
+
+func TestResponsesMaxOutputTokensClampsResponsesMinimum(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{"model":"glm-5.3","input":"probe","max_output_tokens":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["max_tokens"] != float64(16) {
+		t.Fatalf("max_tokens=%v", body["max_tokens"])
+	}
+}
+
+func TestResponsesToolChoiceDropsFilteredHostedTool(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":"search",
+		"tools":[{"type":"web_search"},{"type":"function","name":"ping","parameters":{"type":"object"}}],
+		"tool_choice":{"type":"function","name":"web_search"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["tool_choice"]; ok {
+		t.Fatalf("filtered tool_choice leaked: %v", body["tool_choice"])
+	}
+	if len(body["tools"].([]any)) != 1 {
+		t.Fatalf("tools=%v", body["tools"])
 	}
 }
 

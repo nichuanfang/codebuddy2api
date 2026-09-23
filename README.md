@@ -192,6 +192,7 @@ model_auto_compact_token_limit = 900000
 - 使用 CodeBuddy 的插件登录、Token 轮询与刷新接口；登录中的 `10008` 和 `11217` 会继续轮询。
 - 使用 `/v3/config` 获取实时模型目录，不依赖长期维护的硬编码模型清单。
 - 支持 Codex Responses、Anthropic Messages、OpenAI Chat Completions 三种协议，并转换工具调用、流式响应、reasoning 和常见多模态内容。
+- CodeBuddy 上游不执行 Responses hosted tools；`web_search`、`file_search` 等会被安全降级并记录 warning，function/custom/MCP 工具仍会正常转换。
 - 对 Codex / Agent harness 的 system、developer、工具描述和历史上下文做出站清洗，降低上游策略误判；遇到 `11128` 会自动用更严格模式重试一次。
 - 多账号支持 sticky、least_used、round_robin；结合额度、失败冷却和实测 `usage.credit` 选择账号。
 - 上游 HTTP 连接复用、HTTP/2、长流式响应和 gzip 请求均已启用；流式响应不使用容易截断长回答的总超时。

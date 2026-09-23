@@ -43,6 +43,11 @@ type ChatRequestMeta struct {
 	AffinityKey    string
 	Compact        bool
 	ToolRegistry   *responseToolRegistry
+	// ResponsesDowngradedTools records hosted/unknown Responses tools omitted
+	// before forwarding to the Chat Completions upstream.
+	ResponsesDowngradedTools []string
+	// ResponsesDowngradedItems records hosted history items converted or skipped.
+	ResponsesDowngradedItems []string
 }
 
 func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
@@ -116,10 +121,12 @@ func (p *Proxy) HandleResponses(c *gin.Context) {
 	}
 	meta, err := PrepareResponsesBody(raw)
 	if err != nil {
-		gatewayError(c, ProtocolResponses, http.StatusBadRequest, err.Error())
+		logResponsesPrepareError(c, raw, err)
+		gatewayErrorWithDetails(c, ProtocolResponses, http.StatusBadRequest, err.Error(), "invalid_request_error", "", requestIDFromContext(c))
 		return
 	}
 	attachClientMeta(c, meta)
+	logResponsesDowngrade(meta, c)
 	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
 }
@@ -136,7 +143,8 @@ func (p *Proxy) HandleResponsesCompact(c *gin.Context) {
 	}
 	meta, err := PrepareResponsesCompactBody(raw)
 	if err != nil {
-		gatewayError(c, ProtocolResponses, http.StatusBadRequest, err.Error())
+		logResponsesPrepareError(c, raw, err)
+		gatewayErrorWithDetails(c, ProtocolResponses, http.StatusBadRequest, err.Error(), "invalid_request_error", "", requestIDFromContext(c))
 		return
 	}
 	attachClientMeta(c, meta)
@@ -399,7 +407,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			raw, _ := io.ReadAll(resp.Body)
 			lastUpstreamStatus = resp.StatusCode
 			lastUpstreamRaw = append(lastUpstreamRaw[:0], raw...)
-			lastUpstreamRequestID = resp.Header.Get("X-Request-Id")
+			lastUpstreamRequestID = upstreamRequestID(resp)
 			resp.Body.Close()
 			cancel()
 			lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
@@ -415,7 +423,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			raw, _ := io.ReadAll(resp.Body)
 			lastUpstreamStatus = resp.StatusCode
 			lastUpstreamRaw = append(lastUpstreamRaw[:0], raw...)
-			lastUpstreamRequestID = resp.Header.Get("X-Request-Id")
+			lastUpstreamRequestID = upstreamRequestID(resp)
 			resp.Body.Close()
 			cancel()
 			lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
@@ -436,7 +444,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 				raw, _ = io.ReadAll(resp.Body)
 				lastUpstreamStatus = resp.StatusCode
 				lastUpstreamRaw = append(lastUpstreamRaw[:0], raw...)
-				lastUpstreamRequestID = resp.Header.Get("X-Request-Id")
+				lastUpstreamRequestID = upstreamRequestID(resp)
 				resp.Body.Close()
 				cancel()
 				lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
@@ -468,7 +476,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			if isUpstreamRequestError(raw) {
 				status = http.StatusBadRequest
 			}
-			gatewayErrorFromUpstream(c, meta.Protocol, status, lastErr, raw, resp.Header.Get("X-Request-Id"))
+			gatewayErrorFromUpstream(c, meta.Protocol, status, lastErr, raw, upstreamRequestID(resp))
 			p.recordUsage(acc, meta, start, resp.StatusCode, lastErr, nil)
 			return
 		}
@@ -485,6 +493,24 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 		return
 	}
 	gatewayError(c, meta.Protocol, http.StatusServiceUnavailable, lastErr)
+}
+
+func upstreamRequestID(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	if id := resp.Header.Get("X-Request-Id"); id != "" {
+		return id
+	}
+	return resp.Header.Get("X-Request-ID")
+}
+
+func propagateUpstreamRequestID(c *gin.Context, resp *http.Response) string {
+	id := upstreamRequestID(resp)
+	if c != nil && id != "" {
+		c.Header("X-Request-Id", id)
+	}
+	return id
 }
 
 func upstreamGatewayStatus(status int, raw []byte) int {
@@ -562,6 +588,7 @@ func (p *Proxy) writeResponse(c *gin.Context, resp *http.Response, meta *ChatReq
 }
 
 func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
+	reqID := propagateUpstreamRequestID(c, resp)
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
@@ -576,7 +603,6 @@ func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatReque
 	finishReason := ""
 	doneSeen := false
 	collector := NewCaptureCollector()
-	reqID := resp.Header.Get("X-Request-Id")
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
 	defer watchdog.stop()
 	stopHeartbeat := startSSEHeartbeat(sink)
@@ -632,6 +658,7 @@ func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatReque
 }
 
 func (p *Proxy) writeJSON(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
+	requestID := propagateUpstreamRequestID(c, resp)
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
 	defer watchdog.stop()
 	result, err := collectSSEWithStart(resp.Body, meta.RequestedModel, start)
@@ -648,7 +675,7 @@ func (p *Proxy) writeJSON(c *gin.Context, resp *http.Response, meta *ChatRequest
 		result.Usage = &parsedUsage{}
 	}
 	if result.Usage.RequestID == "" {
-		result.Usage.RequestID = resp.Header.Get("X-Request-Id")
+		result.Usage.RequestID = requestID
 	}
 	collector := NewCaptureCollector()
 	collector.Write(jsonResponseText(result))
@@ -795,6 +822,50 @@ func attachClientMeta(c *gin.Context, meta *ChatRequestMeta) {
 	}
 	meta.ClientIP = c.ClientIP()
 	meta.UserAgent = clipText(c.Request.UserAgent(), 240)
+}
+
+func logResponsesPrepareError(c *gin.Context, raw []byte, err error) {
+	if global.CORE_LOG == nil {
+		return
+	}
+	global.CORE_LOG.Error("Responses request rejected",
+		zap.String("model", requestModelFromRaw(raw)),
+		zap.String("request_id", requestIDFromContext(c)),
+		zap.Error(err),
+	)
+}
+
+func logResponsesDowngrade(meta *ChatRequestMeta, c *gin.Context) {
+	if meta == nil || global.CORE_LOG == nil {
+		return
+	}
+	if len(meta.ResponsesDowngradedTools) == 0 && len(meta.ResponsesDowngradedItems) == 0 {
+		return
+	}
+	global.CORE_LOG.Warn("Responses request downgraded unsupported capabilities",
+		zap.String("model", meta.RequestedModel),
+		zap.Strings("tools", meta.ResponsesDowngradedTools),
+		zap.Strings("items", meta.ResponsesDowngradedItems),
+		zap.String("request_id", requestIDFromContext(c)),
+	)
+}
+
+func requestModelFromRaw(raw []byte) string {
+	var body map[string]any
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	return asString(body["model"])
+}
+
+func requestIDFromContext(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	if value := c.GetHeader("X-Request-Id"); value != "" {
+		return value
+	}
+	return c.GetHeader("X-Request-ID")
 }
 
 func (p *Proxy) recordUsage(acc *model.Account, meta *ChatRequestMeta, start time.Time, status int, errMsg string, usage *parsedUsage) {

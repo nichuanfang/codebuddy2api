@@ -85,6 +85,8 @@ experimental_bearer_token = "sk-change-me"
 
 改完后重启 Codex，新会话即可走本地网关。
 
+> CodeBuddy 上游使用 Chat Completions，不执行 Responses hosted tools。Codex 请求中的 `web_search`、`file_search` 等工具会被安全降级并记录 warning；function、custom 和 MCP 工具仍会转换后执行。
+
 ## 常用命令
 
 Windows（PowerShell）：

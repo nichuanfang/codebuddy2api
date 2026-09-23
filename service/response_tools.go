@@ -8,12 +8,25 @@ import (
 // responseToolBinding records the reversible name/type translation for one
 // Responses tool. The upstream API only accepts flat function names, while
 // Codex may expose namespaced MCP tools and custom tools.
+//
+// A binding has two distinct "client facing" shapes:
+//
+//   - Namespaced tools (MCP / namespace groups) must be re-emitted as
+//     {namespace: "mcp__context7", name: "resolve_library_id"} because the
+//     Codex runtime dispatches on that pair. Emitting a bare flat name makes
+//     Codex answer "unsupported call: resolve_library_id".
+//   - Plain functions and custom tools are emitted as a flat name.
 type responseToolBinding struct {
 	ClientName    string
 	UpstreamName  string
 	QualifiedName string
 	Kind          string
 	InputField    string
+	// ClientNamespace is the Codex-facing namespace, e.g. "mcp__context7".
+	// Empty for plain (non-namespaced) tools.
+	ClientNamespace string
+	// ClientLeafName is the Codex-facing leaf name inside ClientNamespace.
+	ClientLeafName string
 }
 
 type responseToolRegistry struct {
@@ -26,8 +39,10 @@ func newResponseToolRegistry(candidates []responseToolCandidate) *responseToolRe
 		return nil
 	}
 	counts := make(map[string]int, len(candidates))
+	qualifiedCounts := make(map[string]int, len(candidates))
 	for _, candidate := range candidates {
 		counts[toolNameKey(candidate.ClientName)]++
+		qualifiedCounts[toolNameKey(candidate.QualifiedName)]++
 	}
 	registry := &responseToolRegistry{
 		bindings: make([]*responseToolBinding, 0, len(candidates)),
@@ -35,15 +50,29 @@ func newResponseToolRegistry(candidates []responseToolCandidate) *responseToolRe
 	}
 	for _, candidate := range candidates {
 		clientName := candidate.ClientName
-		if counts[toolNameKey(candidate.ClientName)] > 1 {
+		leafName := candidate.ClientName
+		namespace := ""
+		// Codex dispatches namespaced tools on the namespace/leaf pair, so the
+		// leaf name can stay short. The flat upstream name must nevertheless be
+		// unambiguous: when the same leaf name appears in more than one
+		// namespace the upstream name falls back to the qualified form.
+		if candidate.Namespace != "" {
+			namespace = candidate.Namespace
+			if qualifiedCounts[toolNameKey(candidate.QualifiedName)] > 1 ||
+				counts[toolNameKey(candidate.ClientName)] > 1 {
+				clientName = candidate.QualifiedName
+			}
+		} else if counts[toolNameKey(candidate.ClientName)] > 1 {
 			clientName = candidate.QualifiedName
 		}
 		binding := &responseToolBinding{
-			ClientName:    clientName,
-			UpstreamName:  clientName,
-			QualifiedName: candidate.QualifiedName,
-			Kind:          candidate.Kind,
-			InputField:    candidate.InputField,
+			ClientName:      clientName,
+			UpstreamName:    clientName,
+			QualifiedName:   candidate.QualifiedName,
+			Kind:            candidate.Kind,
+			InputField:      candidate.InputField,
+			ClientNamespace: namespace,
+			ClientLeafName:  leafName,
 		}
 		registry.bindings = append(registry.bindings, binding)
 		registry.addAlias(binding.ClientName, binding)
@@ -126,6 +155,42 @@ func (r *responseToolRegistry) UpstreamNameFor(name string) (string, *responseTo
 	return name, nil
 }
 
+// UpstreamNameForClientCall resolves the pair emitted by Codex for a
+// namespaced tool. Looking up only the leaf name is ambiguous when two MCP
+// servers expose the same tool (for example, both expose "lookup").
+func (r *responseToolRegistry) UpstreamNameForClientCall(namespace, name string) (string, *responseToolBinding) {
+	if r == nil {
+		return name, nil
+	}
+	if strings.TrimSpace(namespace) == "" {
+		return r.UpstreamNameFor(name)
+	}
+	ns := toolNameKey(namespace)
+	if !strings.HasPrefix(ns, "mcp__") {
+		ns = "mcp__" + ns
+	}
+	leaf := toolNameKey(name)
+	var match *responseToolBinding
+	for _, binding := range r.bindings {
+		if toolNameKey(binding.ClientNamespace) != ns {
+			continue
+		}
+		if leaf != toolNameKey(binding.ClientLeafName) &&
+			leaf != toolNameKey(binding.ClientName) &&
+			leaf != toolNameKey(binding.QualifiedName) {
+			continue
+		}
+		if match != nil && match != binding {
+			return name, nil
+		}
+		match = binding
+	}
+	if match == nil {
+		return name, nil
+	}
+	return match.UpstreamName, match
+}
+
 func toolNameKey(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
@@ -145,6 +210,19 @@ func normalizeResponseToolCall(tc *AggregatedToolCall, registry *responseToolReg
 	return binding
 }
 
+// applyClientNamespace rewrites a normalized call name into the
+// namespace/leaf pair that the Codex runtime expects for MCP tools.
+func applyClientNamespace(binding *responseToolBinding, name string) (namespace, leaf string) {
+	if binding == nil || binding.ClientNamespace == "" {
+		return "", name
+	}
+	leaf = binding.ClientLeafName
+	if leaf == "" {
+		leaf = name
+	}
+	return binding.ClientNamespace, leaf
+}
+
 func unwrapCustomResponseArgs(args string, binding *responseToolBinding) string {
 	if binding == nil || binding.InputField == "" {
 		return unwrapFreeformArgs(args)
@@ -161,16 +239,19 @@ func unwrapJSONField(args, field string) string {
 	if err := json.Unmarshal([]byte(s), &obj); err != nil {
 		return args
 	}
-	value, ok := obj[field]
-	if !ok {
-		return args
+	for _, candidate := range customInputFields(field) {
+		value, ok := obj[candidate]
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok {
+			return text
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return args
+		}
+		return string(encoded)
 	}
-	if text, ok := value.(string); ok {
-		return text
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return args
-	}
-	return string(encoded)
+	return args
 }

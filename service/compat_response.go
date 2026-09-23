@@ -151,8 +151,9 @@ func encodeResponsesJSONWithRegistry(result *ChatResult, registry *responseToolR
 	// visible even when passthrough is disabled.
 	if result.Reasoning != "" {
 		output = append(output, map[string]any{
-			"id":   newID("rs_"),
-			"type": "reasoning",
+			"id":     newID("rs_"),
+			"type":   "reasoning",
+			"status": "completed",
 			"summary": []any{
 				map[string]any{"type": "summary_text", "text": result.Reasoning},
 			},
@@ -180,27 +181,37 @@ func encodeResponsesJSONWithRegistry(result *ChatResult, registry *responseToolR
 			callID = newID("call_")
 		}
 		if binding != nil && binding.Kind == responseToolCustom || binding == nil && isFreeformTool(tc.Name) {
-			output = append(output, map[string]any{
+			_, displayName := applyClientNamespace(binding, tc.Name)
+			item := map[string]any{
 				"id":      newID("ctc_"),
 				"type":    "custom_tool_call",
 				"status":  "completed",
 				"call_id": callID,
-				"name":    tc.Name,
+				"name":    displayName,
 				"input":   unwrapCustomResponseArgs(tc.Arguments, binding),
-			})
+			}
+			if namespace, _ := applyClientNamespace(binding, tc.Name); namespace != "" {
+				item["namespace"] = namespace
+			}
+			output = append(output, item)
 			continue
 		}
-		output = append(output, map[string]any{
+		item := map[string]any{
 			"id":        newID("fc_"),
 			"type":      "function_call",
 			"status":    "completed",
 			"call_id":   callID,
 			"name":      tc.Name,
 			"arguments": tc.Arguments,
-		})
+		}
+		if namespace, leaf := applyClientNamespace(binding, tc.Name); namespace != "" {
+			item["namespace"] = namespace
+			item["name"] = leaf
+		}
+		output = append(output, item)
 	}
 	status := "completed"
-	if result.FinishReason == "length" {
+	if responsesFinishReasonIsLength(result.FinishReason) {
 		status = "incomplete"
 	}
 	var incompleteDetails any
@@ -227,6 +238,15 @@ func encodeResponsesJSONWithRegistry(result *ChatResult, registry *responseToolR
 		}(),
 	}
 	return json.Marshal(resp)
+}
+
+func responsesFinishReasonIsLength(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 func encodeAnthropicJSON(result *ChatResult) ([]byte, error) {
