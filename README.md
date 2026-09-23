@@ -124,6 +124,17 @@ $env:GATEWAY_PASSWORDLESS = "true"
 
 `/v1/messages/count_tokens` 默认使用本地估算。如需读取上游真实 usage，可设置 `gateway.count-tokens-mode: upstream`；该模式会发起一次最小生成请求，可能消耗上游额度。
 
+### Codex 上下文窗口
+
+上下文窗口由 Codex 客户端的 `model_context_window` 与 `model_auto_compact_token_limit` 决定；Responses 请求本身不会携带这两个配置值。网关不会按本地模型目录中的 `max_input` 截断请求，而是完整转发 Codex 已组装的上下文。例如 1M 上下文可在 Codex 的 `config.toml` 中配置：
+
+```toml
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+```
+
+`max_input` 目前只用于控制台模型信息展示，不是网关侧硬限制。最终可用上下文仍受实际 CodeBuddy 上游模型限制；如果上游拒绝超长请求，网关会保留上游错误而不会静默截断历史。
+
 ## 登录与账号
 
 官方登录命令会打开 CodeBuddy 登录页，并把登录态保存到本地 SQLite：
