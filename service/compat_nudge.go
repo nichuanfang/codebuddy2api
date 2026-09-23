@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -25,29 +26,75 @@ func injectUnattendedRuntime(chat map[string]any) {
 		return
 	}
 	model := asString(chat["model"])
-	msgs, _ := chat["messages"].([]any)
-	for _, item := range msgs {
-		m, _ := item.(map[string]any)
-		if m == nil {
+	msgs, ok := chat["messages"].([]any)
+	if !ok {
+		return
+	}
+
+	// Keep every system instruction at the front. The Responses converter
+	// already does this for normal requests, but nudge/injection is also used
+	// by tests and future callers after conversion.
+	msgs = moveSystemMessagesToHead(msgs)
+	strict := requiresStrictExecution(model)
+	needRuntime, needStrict := true, strict
+	for _, raw := range msgs {
+		message, _ := raw.(map[string]any)
+		if message == nil || asString(message["role"]) != "system" {
 			continue
 		}
-		if asString(m["role"]) == "system" && asString(m["content"]) == unattendedRuntimeNote {
-			if requiresStrictExecution(model) {
-				for _, existing := range msgs {
-					em, _ := existing.(map[string]any)
-					if em != nil && asString(em["role"]) == "system" && asString(em["content"]) == modelExecutionNote {
-						return
-					}
-				}
-				chat["messages"] = append(msgs, map[string]any{"role": "system", "content": modelExecutionNote})
+		content := asString(message["content"])
+		if strings.Contains(content, unattendedRuntimeNote) {
+			needRuntime = false
+		}
+		if strings.Contains(content, modelExecutionNote) {
+			needStrict = false
+		}
+	}
+	if !needRuntime && !needStrict {
+		chat["messages"] = msgs
+		return
+	}
+
+	var notes []string
+	if needRuntime {
+		notes = append(notes, unattendedRuntimeNote)
+	}
+	if needStrict {
+		notes = append(notes, modelExecutionNote)
+	}
+	injected := strings.Join(notes, "\n\n")
+	if len(msgs) > 0 {
+		if first, ok := msgs[0].(map[string]any); ok && asString(first["role"]) == "system" {
+			if content, ok := first["content"].(string); ok && strings.TrimSpace(content) != "" {
+				first["content"] = content + "\n\n" + injected
+			} else {
+				msgs = append([]any{map[string]any{"role": "system", "content": injected}}, msgs...)
 			}
+			chat["messages"] = msgs
 			return
 		}
 	}
-	chat["messages"] = append(msgs, map[string]any{"role": "system", "content": unattendedRuntimeNote})
-	if requiresStrictExecution(model) {
-		chat["messages"] = append(chat["messages"].([]any), map[string]any{"role": "system", "content": modelExecutionNote})
+	chat["messages"] = append([]any{map[string]any{"role": "system", "content": injected}}, msgs...)
+}
+
+func moveSystemMessagesToHead(messages []any) []any {
+	if len(messages) < 2 {
+		return messages
 	}
+	systems := make([]any, 0, len(messages))
+	rest := make([]any, 0, len(messages))
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		if message != nil && asString(message["role"]) == "system" {
+			systems = append(systems, raw)
+		} else {
+			rest = append(rest, raw)
+		}
+	}
+	if len(systems) == 0 || len(rest) == 0 {
+		return messages
+	}
+	return append(systems, rest...)
 }
 
 type executionPolicy struct {
@@ -129,7 +176,10 @@ func nudgeChatBody(body []byte, assistantText string) ([]byte, error) {
 	if err := json.Unmarshal(body, &chat); err != nil {
 		return nil, err
 	}
-	msgs, _ := chat["messages"].([]any)
+	msgs, ok := chat["messages"].([]any)
+	if !ok {
+		return nil, errors.New("nudge chat messages must be an array")
+	}
 	msgs = append(msgs, map[string]any{"role": "assistant", "content": assistantText})
 	msgs = append(msgs, map[string]any{
 		"role":    "user",
@@ -166,6 +216,9 @@ func (p *Proxy) nudgePreambleIfNeeded(c *gin.Context, meta *ChatRequestMeta, em 
 		resp, err := p.doUpstream(nudgeCtx, acc, "/v2/chat/completions", nudged)
 		if err != nil {
 			cancel()
+			if c.Request.Context().Err() != nil {
+				return totalUsage, wrapDownstreamWrite(c.Request.Context().Err())
+			}
 			global.CORE_LOG.Warn("preamble nudge upstream failed", zap.Int("attempt", attempt), zap.Error(err))
 			return totalUsage, nil
 		}
@@ -183,6 +236,9 @@ func (p *Proxy) nudgePreambleIfNeeded(c *gin.Context, meta *ChatRequestMeta, em 
 		watchdog.stop()
 		resp.Body.Close()
 		cancel()
+		if c.Request.Context().Err() != nil {
+			return totalUsage, wrapDownstreamWrite(c.Request.Context().Err())
+		}
 		if streamErr == context.Canceled && watchdogTimedOut {
 			streamErr = errStreamIdle
 		}
