@@ -41,6 +41,7 @@ type ChatRequestMeta struct {
 	UserAgent      string
 	RequestPreview string
 	AffinityKey    string
+	Compact        bool
 }
 
 func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
@@ -113,6 +114,26 @@ func (p *Proxy) HandleResponses(c *gin.Context) {
 		return
 	}
 	meta, err := PrepareResponsesBody(raw)
+	if err != nil {
+		gatewayError(c, ProtocolResponses, http.StatusBadRequest, err.Error())
+		return
+	}
+	attachClientMeta(c, meta)
+	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
+	p.relay(c, meta, "/v2/chat/completions")
+}
+
+func (p *Proxy) HandleResponsesCompact(c *gin.Context) {
+	raw, err := readRequestBody(c)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errRequestBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		gatewayError(c, ProtocolResponses, status, err.Error())
+		return
+	}
+	meta, err := PrepareResponsesCompactBody(raw)
 	if err != nil {
 		gatewayError(c, ProtocolResponses, http.StatusBadRequest, err.Error())
 		return
@@ -320,6 +341,9 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	exclude := map[uint]struct{}{}
 	retries := global.CORE_CONFIG.Gateway.Retries()
 	var lastErr string
+	var lastUpstreamStatus int
+	var lastUpstreamRaw []byte
+	var lastUpstreamRequestID string
 	wafRetried := false
 
 	for i := 0; i < retries; i++ {
@@ -372,6 +396,9 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
 			raw, _ := io.ReadAll(resp.Body)
+			lastUpstreamStatus = resp.StatusCode
+			lastUpstreamRaw = append(lastUpstreamRaw[:0], raw...)
+			lastUpstreamRequestID = resp.Header.Get("X-Request-Id")
 			resp.Body.Close()
 			cancel()
 			lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
@@ -385,6 +412,9 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 
 		if resp.StatusCode != http.StatusOK {
 			raw, _ := io.ReadAll(resp.Body)
+			lastUpstreamStatus = resp.StatusCode
+			lastUpstreamRaw = append(lastUpstreamRaw[:0], raw...)
+			lastUpstreamRequestID = resp.Header.Get("X-Request-Id")
 			resp.Body.Close()
 			cancel()
 			lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
@@ -403,6 +433,9 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 					return
 				}
 				raw, _ = io.ReadAll(resp.Body)
+				lastUpstreamStatus = resp.StatusCode
+				lastUpstreamRaw = append(lastUpstreamRaw[:0], raw...)
+				lastUpstreamRequestID = resp.Header.Get("X-Request-Id")
 				resp.Body.Close()
 				cancel()
 				lastErr = fmt.Sprintf("upstream %d: %s", resp.StatusCode, clip(raw, 200))
@@ -434,7 +467,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			if isUpstreamRequestError(raw) {
 				status = http.StatusBadRequest
 			}
-			gatewayError(c, meta.Protocol, status, lastErr)
+			gatewayErrorFromUpstream(c, meta.Protocol, status, lastErr, raw, resp.Header.Get("X-Request-Id"))
 			p.recordUsage(acc, meta, start, resp.StatusCode, lastErr, nil)
 			return
 		}
@@ -446,7 +479,21 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	if lastErr == "" {
 		lastErr = "no available codebuddy account"
 	}
+	if lastUpstreamStatus != 0 && len(lastUpstreamRaw) > 0 {
+		gatewayErrorFromUpstream(c, meta.Protocol, upstreamGatewayStatus(lastUpstreamStatus, lastUpstreamRaw), lastErr, lastUpstreamRaw, lastUpstreamRequestID)
+		return
+	}
 	gatewayError(c, meta.Protocol, http.StatusServiceUnavailable, lastErr)
+}
+
+func upstreamGatewayStatus(status int, raw []byte) int {
+	if status >= 500 {
+		return http.StatusBadGateway
+	}
+	if status == http.StatusBadRequest && !isUpstreamRequestError(raw) {
+		return http.StatusBadGateway
+	}
+	return status
 }
 
 func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Response, cancel context.CancelFunc, meta *ChatRequestMeta, start time.Time) {
@@ -815,10 +862,5 @@ func (p *Proxy) recordUsage(acc *model.Account, meta *ChatRequestMeta, start tim
 }
 
 func openaiError(c *gin.Context, status int, msg string) {
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"message": msg,
-			"type":    "codebuddy_gateway_error",
-		},
-	})
+	openaiErrorWithDetails(c, status, msg, "codebuddy_gateway_error", "", "")
 }

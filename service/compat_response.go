@@ -230,6 +230,10 @@ func mapAnthropicStop(reason string) string {
 }
 
 func gatewayError(c *gin.Context, proto Protocol, status int, msg string) {
+	gatewayErrorWithDetails(c, proto, status, msg, "codebuddy_gateway_error", "", "")
+}
+
+func gatewayErrorWithDetails(c *gin.Context, proto Protocol, status int, msg, code, param, requestID string) {
 	if proto.IsAnthropic() {
 		c.JSON(status, gin.H{
 			"type": "error",

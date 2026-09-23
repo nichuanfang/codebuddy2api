@@ -23,7 +23,12 @@ func OpenAIAuth() gin.HandlerFunc {
 				return
 			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": gin.H{"message": "invalid api key", "type": "invalid_request_error"},
+				"error": gin.H{
+					"message": "invalid api key",
+					"type":    "authentication_error",
+					"code":    "invalid_api_key",
+					"param":   nil,
+				},
 			})
 			return
 		}
