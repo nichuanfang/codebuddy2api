@@ -70,6 +70,135 @@ func TestPrepareResponsesBody(t *testing.T) {
 	}
 }
 
+func TestResponsesCoalescesAssistantToolCallAndPreservesReasoning(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":[
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"inspect first"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect it."}]},
+			{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"},
+			{"type":"message","role":"developer","content":[{"type":"input_text","text":"late policy"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	if len(messages) != 4 {
+		t.Fatalf("messages=%v", messages)
+	}
+	system := messages[0].(map[string]any)
+	if system["role"] != "system" || system["content"] != "late policy" {
+		t.Fatalf("system=%v", system)
+	}
+	assistant := messages[1].(map[string]any)
+	if assistant["role"] != "assistant" || assistant["content"] != "I will inspect it." {
+		t.Fatalf("assistant=%v", assistant)
+	}
+	if assistant["reasoning_content"] != "inspect first" {
+		t.Fatalf("reasoning_content=%v", assistant["reasoning_content"])
+	}
+	calls, _ := assistant["tool_calls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("tool_calls=%v", assistant["tool_calls"])
+	}
+	if messages[2].(map[string]any)["role"] != "tool" || messages[3].(map[string]any)["role"] != "user" {
+		t.Fatalf("message order=%v", messages)
+	}
+}
+
+func TestResponsesDropsToolControlsWhenNoToolsRemain(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":"hi",
+		"tools":[{"type":"web_search"}],
+		"tool_choice":"auto",
+		"parallel_tool_calls":true
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["tools"]; ok {
+		t.Fatalf("unsupported tools should be dropped: %v", body["tools"])
+	}
+	if _, ok := body["tool_choice"]; ok {
+		t.Fatalf("tool_choice without tools should be dropped: %v", body["tool_choice"])
+	}
+	if _, ok := body["parallel_tool_calls"]; ok {
+		t.Fatalf("parallel_tool_calls without tools should be dropped: %v", body["parallel_tool_calls"])
+	}
+}
+
+func TestResponsesDefaultsMissingFunctionSchema(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":"hi",
+		"tools":[
+			{"type":"function","name":"ping","parameters":null},
+			{"type":"function","name":"lookup","parameters":{"type":null,"properties":{"query":{"type":"string"}}}}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	tools := body["tools"].([]any)
+	for _, tool := range tools {
+		parameters := tool.(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
+		if parameters["type"] != "object" {
+			t.Fatalf("parameters=%v", parameters)
+		}
+	}
+}
+
+func TestResponsesRejectsEmptyConvertedInput(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	_, err := PrepareResponsesBody([]byte(`{"model":"glm-5.3","input":[]}`))
+	if err == nil || !strings.Contains(err.Error(), "at least one message") {
+		t.Fatalf("expected actionable empty-input error, got %v", err)
+	}
+}
+
+func TestResponsesPreservesLargeCodexContext(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	text := strings.Repeat("abcd", 1_000_000)
+	raw, err := json.Marshal(map[string]any{"model": "glm-5.3", "input": text})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := PrepareResponsesBody(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	if got := messages[0].(map[string]any)["content"]; got != text {
+		t.Fatalf("large context was changed: got %d bytes, want %d", len(got.(string)), len(text))
+	}
+	if len(meta.RequestPreview) > maxRequestPreview+len("…(已截断)") {
+		t.Fatalf("preview was not bounded: %d", len(meta.RequestPreview))
+	}
+}
+
 func TestPrepareAnthropicBody(t *testing.T) {
 	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
 	meta, err := PrepareAnthropicBody([]byte(`{
@@ -243,12 +372,12 @@ func TestDeveloperRoleMapsToSystem(t *testing.T) {
 		t.Fatal(err)
 	}
 	msgs, _ := body["messages"].([]any)
-	if len(msgs) != 3 {
+	if len(msgs) != 2 {
 		t.Fatalf("messages=%v", msgs)
 	}
-	dev, _ := msgs[1].(map[string]any)
-	if dev["role"] != "system" || dev["content"] != "dev rules" {
-		t.Fatalf("developer mapped=%v", dev)
+	system, _ := msgs[0].(map[string]any)
+	if system["role"] != "system" || system["content"] != "base\n\ndev rules" {
+		t.Fatalf("developer/system merge=%v", system)
 	}
 }
 
@@ -288,7 +417,7 @@ func TestSanitizeCodexFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	msgs, _ := body["messages"].([]any)
-	if len(msgs) != 3 {
+	if len(msgs) != 2 {
 		t.Fatalf("messages=%v", msgs)
 	}
 	sys := msgs[0].(map[string]any)["content"].(string)
@@ -298,17 +427,17 @@ func TestSanitizeCodexFingerprint(t *testing.T) {
 	if !strings.Contains(sys, "Codex CLI") || !strings.Contains(sys, "Keep secrets.") {
 		t.Fatalf("native Codex identity or remainder lost: %s", sys)
 	}
-	// developer 与 system 等价（都会被 normalizeUpstreamRole 映射成 system），
-	// 上游 WAF 不区分两者，所以品牌词同样要脱敏；但除品牌词外必须逐字节保留。
-	dev := msgs[1].(map[string]any)["content"].(string)
-	if strings.Contains(dev, "OpenAI") {
-		t.Fatalf("developer still has raw brand term: %q", dev)
+	// developer 与 system 会合并到首个 system 消息；品牌词同样要脱敏，
+	// 但除零宽字符和消息间的分隔换行外必须保留。
+	if strings.Contains(sys, "OpenAI") {
+		t.Fatalf("merged system still has raw brand term: %q", sys)
 	}
-	if strings.ReplaceAll(dev, "\u200b", "") != "Use Codex CLI with OpenAI." {
-		t.Fatalf("developer content changed beyond zero-width marks: %s", dev)
+	clean := strings.ReplaceAll(sys, "\u200b", "")
+	if !strings.Contains(clean, "Use Codex CLI with OpenAI.") {
+		t.Fatalf("developer content changed beyond zero-width marks: %s", sys)
 	}
 	// user 是真实对话内容，一个字都不能动（含 Codex 注入的运行时上下文）。
-	user := msgs[2].(map[string]any)["content"].(string)
+	user := msgs[1].(map[string]any)["content"].(string)
 	if user != "Codex CLI please" {
 		t.Fatalf("user content should stay intact: %s", user)
 	}

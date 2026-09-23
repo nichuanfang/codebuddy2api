@@ -53,12 +53,17 @@ func responsesToChat(raw []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("model is required")
 	}
 	chat := map[string]any{"model": model}
-	copyChatFields(chat, src, "stream", "temperature", "top_p", "user", "n", "stop", "metadata")
+	copyChatFields(chat, src,
+		"stream", "temperature", "top_p", "user", "n", "stop", "metadata",
+		"frequency_penalty", "presence_penalty", "seed", "service_tier",
+		"logprobs", "top_logprobs", "stream_options",
+	)
 	if v, ok := src["max_output_tokens"]; ok {
 		chat["max_tokens"] = v
-	}
-	if v, ok := src["parallel_tool_calls"]; ok {
-		chat["parallel_tool_calls"] = v
+	} else if v, ok := src["max_completion_tokens"]; ok {
+		chat["max_completion_tokens"] = v
+	} else if v, ok := src["max_tokens"]; ok {
+		chat["max_tokens"] = v
 	}
 
 	messages := make([]any, 0, 4)
@@ -76,13 +81,20 @@ func responsesToChat(raw []byte) (map[string]any, error) {
 		return nil, err
 	}
 	messages = append(messages, convertedInput...)
+	messages = collapseSystemMessagesToHead(messages)
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("responses input must contain at least one message or tool result")
+	}
 	chat["messages"] = messages
 
 	if tools := convertResponsesTools(src["tools"]); tools != nil {
 		chat["tools"] = tools
-	}
-	if tc := convertResponsesToolChoice(src["tool_choice"]); tc != nil {
-		chat["tool_choice"] = tc
+		if tc := convertResponsesToolChoice(src["tool_choice"]); tc != nil {
+			chat["tool_choice"] = tc
+		}
+		if v, ok := src["parallel_tool_calls"]; ok {
+			chat["parallel_tool_calls"] = v
+		}
 	}
 	if r, ok := src["reasoning"].(map[string]any); ok {
 		if effort := asString(r["effort"]); effort != "" {
@@ -128,22 +140,38 @@ func convertResponsesInput(v any) ([]any, error) {
 		}
 	}
 	messages := make([]any, 0, len(arr))
-	var pending []any
-	flush := func() {
-		if len(pending) == 0 {
+	var pendingCalls []any
+	var pendingReasoning []string
+	flushCalls := func() {
+		if len(pendingCalls) == 0 {
 			return
 		}
-		messages = append(messages, map[string]any{
+		// Responses can emit assistant commentary immediately before one or more
+		// function calls. Chat Completions represents that as one assistant turn.
+		if len(messages) > 0 {
+			if previous, ok := messages[len(messages)-1].(map[string]any); ok &&
+				asString(previous["role"]) == "assistant" && previous["tool_calls"] == nil {
+				previous["tool_calls"] = pendingCalls
+				attachReasoningContent(previous, pendingReasoning)
+				pendingCalls = nil
+				pendingReasoning = nil
+				return
+			}
+		}
+		message := map[string]any{
 			"role":       "assistant",
 			"content":    nil,
-			"tool_calls": pending,
-		})
-		pending = nil
+			"tool_calls": pendingCalls,
+		}
+		attachReasoningContent(message, pendingReasoning)
+		messages = append(messages, message)
+		pendingCalls = nil
+		pendingReasoning = nil
 	}
 	for _, item := range arr {
-		if s, ok := item.(string); ok {
-			flush()
-			messages = append(messages, map[string]any{"role": "user", "content": s})
+		if str, ok := item.(string); ok {
+			flushCalls()
+			messages = append(messages, map[string]any{"role": "user", "content": str})
 			continue
 		}
 		m, _ := item.(map[string]any)
@@ -154,9 +182,9 @@ func convertResponsesInput(v any) ([]any, error) {
 		role := asString(m["role"])
 		switch typ {
 		case "function_call", "custom_tool_call":
-			pending = append(pending, responsesFunctionCallToToolCall(m))
+			pendingCalls = append(pendingCalls, responsesFunctionCallToToolCall(m))
 		case "function_call_output", "tool_result", "custom_tool_call_output":
-			flush()
+			flushCalls()
 			callID := asString(m["call_id"])
 			if callID == "" {
 				callID = asString(m["tool_use_id"])
@@ -170,25 +198,111 @@ func convertResponsesInput(v any) ([]any, error) {
 				"tool_call_id": callID,
 				"content":      content,
 			})
-		case "reasoning", "item_reference":
+		case "reasoning":
+			if text := responsesReasoningText(m); text != "" {
+				pendingReasoning = append(pendingReasoning, text)
+			}
+		case "item_reference":
+			// References require server-side conversation state, which this Chat
+			// bridge does not have. Codex normally sends the expanded history.
 			continue
 		default:
-			flush()
+			flushCalls()
 			role = normalizeUpstreamRole(role)
 			content, err := convertChatContent(m["content"])
 			if err != nil {
 				return nil, err
 			}
 			if content == nil || content == "" {
-				if t := asString(m["text"]); t != "" {
-					content = t
+				if text := asString(m["text"]); text != "" {
+					content = text
 				}
 			}
-			messages = append(messages, map[string]any{"role": role, "content": content})
+			message := map[string]any{"role": role, "content": content}
+			if role == "assistant" {
+				attachReasoningContent(message, pendingReasoning)
+			}
+			// Reasoning belongs only to the current assistant turn. A user/system
+			// boundary must not leak stale reasoning into a later assistant turn.
+			pendingReasoning = nil
+			messages = append(messages, message)
 		}
 	}
-	flush()
+	flushCalls()
+	if len(pendingReasoning) > 0 {
+		for i := len(messages) - 1; i >= 0; i-- {
+			message, ok := messages[i].(map[string]any)
+			if ok && asString(message["role"]) == "assistant" {
+				attachReasoningContent(message, pendingReasoning)
+				pendingReasoning = nil
+				break
+			}
+		}
+	}
 	return messages, nil
+}
+
+func responsesReasoningText(item map[string]any) string {
+	var parts []string
+	appendText := func(v any) {
+		if text := strings.TrimSpace(asString(v)); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if summary, ok := item["summary"].([]any); ok {
+		for _, raw := range summary {
+			if part, ok := raw.(map[string]any); ok {
+				appendText(part["text"])
+			}
+		}
+	}
+	if content, ok := item["content"].([]any); ok {
+		for _, raw := range content {
+			if part, ok := raw.(map[string]any); ok {
+				appendText(part["text"])
+			}
+		}
+	}
+	appendText(item["text"])
+	return strings.Join(parts, "\n\n")
+}
+
+func attachReasoningContent(message map[string]any, parts []string) {
+	if len(parts) == 0 {
+		return
+	}
+	text := strings.TrimSpace(strings.Join(parts, "\n\n"))
+	if text == "" {
+		return
+	}
+	if existing := strings.TrimSpace(asString(message["reasoning_content"])); existing != "" {
+		text = existing + "\n\n" + text
+	}
+	message["reasoning_content"] = text
+}
+
+func collapseSystemMessagesToHead(messages []any) []any {
+	if len(messages) < 2 {
+		return messages
+	}
+	var system []string
+	rest := make([]any, 0, len(messages))
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok || asString(message["role"]) != "system" {
+			rest = append(rest, raw)
+			continue
+		}
+		if text := strings.TrimSpace(messageText(message["content"])); text != "" {
+			system = append(system, text)
+		}
+	}
+	if len(system) == 0 {
+		return rest
+	}
+	out := make([]any, 0, len(rest)+1)
+	out = append(out, map[string]any{"role": "system", "content": strings.Join(system, "\n\n")})
+	return append(out, rest...)
 }
 
 func responsesFunctionCallToToolCall(m map[string]any) map[string]any {
@@ -473,12 +587,23 @@ func functionToolFromMap(m map[string]any, prefix string) map[string]any {
 	if d, ok := m["description"]; ok {
 		fn["description"] = d
 	}
-	if p, ok := m["parameters"]; ok {
-		fn["parameters"] = p
-	} else if p, ok := m["input_schema"]; ok {
-		fn["parameters"] = p
+	parameters := m["parameters"]
+	if parameters == nil {
+		parameters = m["input_schema"]
 	}
+	fn["parameters"] = normalizeFunctionParameters(parameters)
 	return map[string]any{"type": "function", "function": fn}
+}
+
+func normalizeFunctionParameters(v any) map[string]any {
+	parameters, ok := v.(map[string]any)
+	if !ok {
+		return map[string]any{"type": "object", "properties": map[string]any{}}
+	}
+	if typ, ok := parameters["type"].(string); !ok || strings.TrimSpace(typ) == "" {
+		parameters["type"] = "object"
+	}
+	return parameters
 }
 
 func customToolToFunction(m map[string]any, prefix string) map[string]any {
