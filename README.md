@@ -6,14 +6,16 @@
 
 ## 下载后无需安装依赖
 
-每个 Windows 发布包由 `make dist` 生成，核心是三件文件，并额外带两个可选的 Windows 便捷脚本：
+每个发布包由 `make dist` 生成，核心是四件文件；Windows 包额外带两个便捷脚本：
 
 ```text
 codebuddy-gateway.exe       # Windows 可执行文件
+codebuddy-gateway           # macOS / Linux 可执行文件
 config.yaml                 # 日常配置：只改必要项
 config.reference.yaml       # 完整配置参考，通常不用改
-stop.ps1                    # 终止后台服务
-start-on-login.vbs          # 适合放进 Windows 启动目录
+README.md                   # 简短上手说明
+stop.ps1                    # 终止后台服务（仅 Windows 包）
+start-on-login.vbs          # 适合放进 Windows 启动目录（仅 Windows 包）
 ```
 
 运行时不需要安装 Go、gcc、Node.js、Python 或数据库。程序会在当前目录自动创建 `data/` 和 `log/`，它们是运行数据，不属于发布包。
@@ -58,6 +60,25 @@ Linux/macOS：
 chmod +x ./codebuddy-gateway
 ./codebuddy-gateway server
 ```
+
+### macOS 用户
+
+macOS 发布包提供 Intel（x64）与 Apple 芯片（arm64）两个版本，按机器架构下载对应压缩包。
+解压后进入目录，首次运行先赋予执行权限：
+
+```bash
+chmod +x ./codebuddy-gateway
+./codebuddy-gateway
+```
+
+首次运行会通过 `open` 自动打开浏览器完成 CodeBuddy 登录；已完成登录后再次启动会直接作为服务运行。
+如果 macOS 提示「无法打开，因为 Apple 无法检查是否包含恶意软件」，可在「系统设置 → 隐私与安全性」
+中点击「仍要打开」，或执行 `xattr -d com.apple.quarantine ./codebuddy-gateway` 移除隔离标记。
+
+停止服务：前台运行时按 `Ctrl+C`；后台运行时用 `pkill -f codebuddy-gateway`。
+
+`stop.ps1` 与 `start-on-login.vbs` 仅适用于 Windows。macOS 如需开机自启，可自行编写
+`launchd` plist；登录态与账号数据同样保存在当前目录的 `data/gateway.db`。
 
 默认监听 `127.0.0.1:8088`，只允许本机访问；如需局域网访问，再显式改为 `0.0.0.0:8088`，并关闭免密。
 
@@ -226,15 +247,23 @@ mingw32-make dist
 ```bash
 make dist GOOS=linux GOARCH=amd64 VERSION=v1.0.0
 make dist GOOS=windows GOARCH=amd64 VERSION=v1.0.0
+make dist GOOS=darwin GOARCH=amd64 VERSION=v1.0.0   # macOS Intel
+make dist GOOS=darwin GOARCH=arm64 VERSION=v1.0.0   # macOS Apple 芯片
 ```
+
+注意 macOS 目标需要在 macOS 上构建：SQLite 依赖 CGO，Windows/Linux 上缺少 macOS 交叉编译工具链，
+本地无法直接产出可用的 darwin 二进制（CI 使用 macOS runner 解决这一点）。
 
 ## 手动发布
 
 仓库提供 `.github/workflows/release.yml`。在 GitHub Actions 中手动运行 **Release**，填写版本号（例如 `v1.0.0`），工作流会：
 
-1. 分别通过 Makefile 构建 Windows x64、Linux x64 产物；
-2. Windows 压缩包包含可执行文件、两个配置文件、`stop.ps1` 和 `start-on-login.vbs`；
+1. 分别通过 Makefile 构建 Windows x64、Linux x64、macOS x64、macOS arm64 四类产物；
+2. 各压缩包包含可执行文件、两个配置文件和 `README.md`；Windows 包另含 `stop.ps1` 与 `start-on-login.vbs`；
 3. 创建或更新对应 GitHub Release，并上传压缩包。
+
+macOS 产物必须在 macOS runner 上原生构建：SQLite 依赖 CGO，无法从 Linux/Windows 交叉编译。
+工作流使用 `macos-15-intel`（Intel x64）与 `macos-15`（Apple 芯片 arm64）两个免费托管 runner。
 
 ## 安全提醒
 

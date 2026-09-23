@@ -8,12 +8,12 @@ Node.js、Python 或数据库。
 
 ```text
 codebuddy-gateway.exe       # 可执行文件（Windows）
-codebuddy-gateway           # 可执行文件（Linux/macOS）
+codebuddy-gateway           # 可执行文件（macOS/Linux）
 config.yaml                 # 日常配置，只需要改必要项
 config.reference.yaml       # 完整配置参考，通常不用改
 README.md                   # 本文件
-stop.ps1                    # 停止后台服务（Windows）
-start-on-login.vbs          # 登录后自动启动（Windows）
+stop.ps1                    # 停止后台服务（仅 Windows 包）
+start-on-login.vbs          # 登录后自动启动（仅 Windows 包）
 ```
 
 `data/` 和 `log/` 由程序在首次运行时自动创建，属于运行数据，不属于发布包。
@@ -32,12 +32,20 @@ start-on-login.vbs          # 登录后自动启动（Windows）
    - `admin-key`：登录控制台和调用 `/admin/*` 使用的 Key。
    - 两者都只在本机网关使用，不是 CodeBuddy 的账号密码。
 
-2. 双击 `codebuddy-gateway.exe` 启动（Linux/macOS 执行 `./codebuddy-gateway`）。
+2. 启动程序：
+
+   - Windows：双击 `codebuddy-gateway.exe`。
+   - macOS / Linux：在终端执行 `./codebuddy-gateway`（macOS 首次运行见下方说明）。
 
    - 首次运行或没有登录账号：程序会自动打开浏览器完成 CodeBuddy 登录。
    - 已经登录过：直接后台启动服务。
 
 3. 浏览器打开 `http://127.0.0.1:8088/`，用 `admin-key` 登录控制台。
+
+> macOS / Linux 下载后若无执行权限，先执行 `chmod +x ./codebuddy-gateway`。
+> macOS 首次运行可能提示「无法打开，因为 Apple 无法检查是否包含恶意软件」，
+> 在「系统设置 → 隐私与安全性」中点击「仍要打开」即可；也可用
+> `xattr -d com.apple.quarantine ./codebuddy-gateway` 移除隔离标记。
 
 启动后客户端接入地址：
 
@@ -79,6 +87,8 @@ experimental_bearer_token = "sk-change-me"
 
 ## 常用命令
 
+Windows（PowerShell）：
+
 ```powershell
 .\codebuddy-gateway.exe server        # 前台运行，方便看日志
 .\codebuddy-gateway.exe auth login    # 手动触发登录
@@ -86,12 +96,25 @@ experimental_bearer_token = "sk-change-me"
 .\stop.ps1                            # 停止后台服务
 ```
 
+macOS / Linux：
+
+```bash
+./codebuddy-gateway server             # 前台运行，方便看日志
+./codebuddy-gateway auth login         # 手动触发登录
+./codebuddy-gateway auth login --no-browser
+./codebuddy-gateway account list       # 查看已导入账号
+./codebuddy-gateway account import-desktop
+# 停止：前台运行时按 Ctrl+C；后台运行时用 pkill / kill
+pkill -f codebuddy-gateway
+```
+
 默认监听 `127.0.0.1:8088`，仅本机可访问。如需局域网访问，把 `system.listenAddr`
 改为 `0.0.0.0:8088`，并务必关闭免密模式、设置足够复杂的 Key。
 
 ## 遇到问题
 
-- 双击没反应：查看 `log/desktop-login.log` 和 `log/gateway.stderr.log`。
+- 启动没反应：Windows 双击无窗口时查看 `log/desktop-login.log`；
+  macOS/Linux 在终端直接运行可看到实时输出，日志同样在 `log/` 目录。
 - 想临时免密：把 `passwordless.enabled` 改为 `true`，仅对 `/v1/*` 生效，
   控制台仍然需要 `admin-key`。
 - 所有配置项、代理、模型别名、多账号策略等说明见 `config.reference.yaml`。
