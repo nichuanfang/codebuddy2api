@@ -18,6 +18,10 @@ func Responses(c *gin.Context) {
 	service.DefaultProxy.HandleResponses(c)
 }
 
+func ResponsesCompact(c *gin.Context) {
+	service.DefaultProxy.HandleResponsesCompact(c)
+}
+
 func Messages(c *gin.Context) {
 	service.DefaultProxy.HandleMessages(c)
 }
@@ -30,6 +34,7 @@ func RegisterRoutes(rg *gin.RouterGroup) {
 	rg.POST("/chat/completions", ChatCompletions)
 	rg.POST("/completions", Completions)
 	rg.POST("/responses", Responses)
+	rg.POST("/responses/compact", ResponsesCompact)
 	rg.POST("/messages", Messages)
 	rg.POST("/messages/count_tokens", CountTokens)
 	rg.GET("/models", ListModels)

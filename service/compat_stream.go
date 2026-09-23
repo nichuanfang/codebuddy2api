@@ -862,7 +862,11 @@ func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatR
 		encoded, err = encodeAnthropicJSON(result)
 		c.Header("anthropic-version", "2023-06-01")
 	default:
-		encoded, err = encodeResponsesJSON(result)
+		if meta.Compact {
+			encoded, err = encodeResponsesCompactionJSON(result)
+		} else {
+			encoded, err = encodeResponsesJSON(result)
+		}
 	}
 	if err != nil {
 		return result.Usage, err

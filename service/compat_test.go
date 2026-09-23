@@ -199,6 +199,143 @@ func TestResponsesPreservesLargeCodexContext(t *testing.T) {
 	}
 }
 
+func TestResponsesCompactEnvelopeRoundTrip(t *testing.T) {
+	result := &ChatResult{
+		ID:      "resp_compact_test",
+		Model:   "glm-5.3",
+		Created: 123,
+		Content: "User wants the gateway to support compacted Codex history.",
+		Usage:   &parsedUsage{PromptTokens: 10, CompletionTokens: 8, TotalTokens: 18},
+	}
+	encoded, err := encodeResponsesCompactionJSON(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["object"] != "response.compaction" {
+		t.Fatalf("object=%v", body["object"])
+	}
+	output := body["output"].([]any)
+	if len(output) != 2 || output[1].(map[string]any)["type"] != "compaction" {
+		t.Fatalf("output=%v", output)
+	}
+	envelope := output[1].(map[string]any)["encrypted_content"].(string)
+	summary, err := decodeCompactEnvelope(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != result.Content {
+		t.Fatalf("summary=%q", summary)
+	}
+	if stored, ok := compactStateFor("resp_compact_test"); !ok || stored != result.Content {
+		t.Fatalf("stored compact state=%q ok=%v", stored, ok)
+	}
+}
+
+func TestPrepareResponsesCompactBody(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesCompactBody([]byte(`{
+		"model":"glm-5.3",
+		"input":[{"role":"user","content":"Remember this task"}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.Compact || meta.ClientStream {
+		t.Fatalf("compact=%v client_stream=%v", meta.Compact, meta.ClientStream)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["stream"] != true {
+		t.Fatalf("upstream stream should remain enabled for SSE collection: %v", body["stream"])
+	}
+	if body["max_tokens"] != float64(8192) {
+		t.Fatalf("max_tokens=%v", body["max_tokens"])
+	}
+	if !strings.Contains(body["messages"].([]any)[0].(map[string]any)["content"].(string), "compacting a conversation") {
+		t.Fatalf("compact instruction missing: %v", body["messages"])
+	}
+}
+
+func TestResponsesConsumesCompactionOutputWithoutDuplicatingSummary(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	compactJSON, err := encodeResponsesCompactionJSON(&ChatResult{
+		ID:      "resp_roundtrip",
+		Content: "Keep the API compatible and preserve the tool contract.",
+		Usage:   &parsedUsage{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compact map[string]any
+	if err := json.Unmarshal(compactJSON, &compact); err != nil {
+		t.Fatal(err)
+	}
+	items := compact["output"].([]any)
+	meta, err := PrepareResponsesBody(mustJSONBytes(map[string]any{
+		"model": "glm-5.3",
+		"input": append(items, map[string]any{
+			"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "next"}},
+		}),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("summary was duplicated: %v", messages)
+	}
+}
+
+func mustJSONBytes(value any) []byte {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+func TestResponsesUsesCompactPreviousResponseID(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	rememberCompactState("resp_previous_test", "The previous turn established the project constraints.")
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"previous_response_id":"resp_previous_test",
+		"input":"continue"
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("messages=%v", messages)
+	}
+	if !strings.Contains(messages[0].(map[string]any)["content"].(string), "previous turn established") {
+		t.Fatalf("summary missing: %v", messages[0])
+	}
+}
+
+func TestResponsesCompactRejectsStreaming(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	_, err := PrepareResponsesCompactBody([]byte(`{"model":"glm-5.3","input":"x","stream":true}`))
+	if err == nil || !strings.Contains(err.Error(), "does not support streaming") {
+		t.Fatalf("unexpected error=%v", err)
+	}
+}
+
 func TestPrepareAnthropicBody(t *testing.T) {
 	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
 	meta, err := PrepareAnthropicBody([]byte(`{
@@ -554,7 +691,14 @@ func TestApplyPatchCustomToolRoundTrip(t *testing.T) {
 	if len(msgs) < 3 {
 		t.Fatalf("messages=%v", msgs)
 	}
-	asst, _ := msgs[1].(map[string]any)
+	var asst map[string]any
+	for _, rawMsg := range msgs {
+		message, _ := rawMsg.(map[string]any)
+		if message != nil && message["role"] == "assistant" {
+			asst = message
+			break
+		}
+	}
 	calls, _ := asst["tool_calls"].([]any)
 	if len(calls) != 1 {
 		t.Fatalf("tool_calls=%v", asst)
@@ -570,8 +714,15 @@ func TestApplyPatchCustomToolRoundTrip(t *testing.T) {
 	if args["input"] != patch {
 		t.Fatalf("wrapped input=%q", args["input"])
 	}
-	tool, _ := msgs[2].(map[string]any)
-	if tool["role"] != "tool" || tool["tool_call_id"] != "call_1" || tool["content"] != "ok" {
+	var tool map[string]any
+	for _, rawMsg := range msgs {
+		message, _ := rawMsg.(map[string]any)
+		if message != nil && message["role"] == "tool" {
+			tool = message
+			break
+		}
+	}
+	if tool["tool_call_id"] != "call_1" || tool["content"] != "ok" {
 		t.Fatalf("tool output=%v", tool)
 	}
 }

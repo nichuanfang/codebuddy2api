@@ -76,6 +76,62 @@ func encodeChatJSON(result *ChatResult) ([]byte, error) {
 	return json.Marshal(resp)
 }
 
+func encodeResponsesCompactionJSON(result *ChatResult) ([]byte, error) {
+	if result == nil {
+		result = &ChatResult{}
+	}
+	if result.Usage == nil {
+		result.Usage = &parsedUsage{}
+	}
+	summary := strings.TrimSpace(result.Content)
+	if summary == "" {
+		summary = strings.TrimSpace(result.Reasoning)
+	}
+	if summary == "" {
+		summary = "No conversation summary was produced. Continue from the available context."
+	}
+	id := ensureID(result.ID, "resp_")
+	rememberCompactState(id, summary)
+	usage := map[string]any{
+		"input_tokens":  result.Usage.PromptTokens,
+		"output_tokens": result.Usage.CompletionTokens,
+		"total_tokens":  result.Usage.TotalTokens,
+		"input_tokens_details": map[string]any{
+			"cached_tokens":      result.Usage.CacheHitTokens,
+			"cache_write_tokens": result.Usage.CacheWriteTokens,
+		},
+		"output_tokens_details": map[string]any{
+			"reasoning_tokens": result.Usage.ThinkingTokens,
+		},
+	}
+	attachResponsesCacheUsage(usage, result.Usage)
+	resp := map[string]any{
+		"id":         id,
+		"object":     "response.compaction",
+		"created_at": result.Created,
+		"model":      result.Model,
+		"output": []any{
+			map[string]any{
+				"id":     newID("msg_"),
+				"type":   "message",
+				"status": "completed",
+				"role":   "user",
+				"content": []any{map[string]any{
+					"type": "input_text",
+					"text": summary,
+				}},
+			},
+			map[string]any{
+				"id":                newID("cmp_"),
+				"type":              "compaction",
+				"encrypted_content": encodeCompactEnvelope(summary),
+			},
+		},
+		"usage": usage,
+	}
+	return json.Marshal(resp)
+}
+
 func encodeResponsesJSON(result *ChatResult) ([]byte, error) {
 	if result == nil {
 		result = &ChatResult{}
@@ -244,7 +300,7 @@ func gatewayErrorWithDetails(c *gin.Context, proto Protocol, status int, msg, co
 		})
 		return
 	}
-	openaiError(c, status, msg)
+	openaiErrorWithDetails(c, status, msg, code, param, requestID)
 }
 
 func anthropicErrorType(status int) string {

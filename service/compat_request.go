@@ -26,6 +26,61 @@ func PrepareResponsesBody(raw []byte) (*ChatRequestMeta, error) {
 	return meta, nil
 }
 
+func PrepareResponsesCompactBody(raw []byte) (*ChatRequestMeta, error) {
+	var src map[string]any
+	if err := json.Unmarshal(raw, &src); err != nil {
+		return nil, fmt.Errorf("invalid json body")
+	}
+	if stream, ok := src["stream"].(bool); ok && stream {
+		return nil, fmt.Errorf("responses compact does not support streaming")
+	}
+	model, _ := src["model"].(string)
+	if strings.TrimSpace(model) == "" {
+		return nil, fmt.Errorf("model is required")
+	}
+	if src["input"] == nil {
+		if previousID := asString(src["previous_response_id"]); previousID != "" {
+			if summary, ok := compactStateFor(previousID); ok {
+				src["input"] = []any{summarySystemMessage(summary)}
+				delete(src, "previous_response_id")
+			} else {
+				return nil, fmt.Errorf("previous_response_id %q is not available in this gateway instance", previousID)
+			}
+		}
+	}
+	instructions := strings.TrimSpace(asString(src["instructions"]))
+	if instructions == "" {
+		src["instructions"] = compactInstruction
+	} else {
+		src["instructions"] = instructions + "\n\n" + compactInstruction
+	}
+	src["stream"] = false
+	src["max_output_tokens"] = 8192
+	delete(src, "tools")
+	delete(src, "tool_choice")
+	delete(src, "parallel_tool_calls")
+	encoded, err := json.Marshal(src)
+	if err != nil {
+		return nil, err
+	}
+	chat, err := responsesToChat(encoded)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err = json.Marshal(chat)
+	if err != nil {
+		return nil, err
+	}
+	meta, err := PrepareChatBody(encoded)
+	if err != nil {
+		return nil, err
+	}
+	meta.Protocol = ProtocolResponses
+	meta.Compact = true
+	meta.ClientStream = false
+	return meta, nil
+}
+
 func PrepareAnthropicBody(raw []byte) (*ChatRequestMeta, error) {
 	chat, err := anthropicToChat(raw)
 	if err != nil {
@@ -67,6 +122,13 @@ func responsesToChat(raw []byte) (map[string]any, error) {
 	}
 
 	messages := make([]any, 0, 4)
+	if previousID := asString(src["previous_response_id"]); previousID != "" {
+		summary, ok := compactStateFor(previousID)
+		if !ok {
+			return nil, fmt.Errorf("previous_response_id %q is not available in this gateway instance", previousID)
+		}
+		messages = append(messages, summarySystemMessage(summary))
+	}
 	if src["instructions"] != nil {
 		inst, err := convertChatContent(src["instructions"])
 		if err != nil {
@@ -202,6 +264,23 @@ func convertResponsesInput(v any) ([]any, error) {
 			if text := responsesReasoningText(m); text != "" {
 				pendingReasoning = append(pendingReasoning, text)
 			}
+		case "compaction":
+			flushCalls()
+			summary, err := compactionSummaryFromItem(m)
+			if err != nil {
+				return nil, err
+			}
+			// The official compact response contains both a human-readable
+			// summary message and a compaction item. Keep only the system
+			// summary when the client sends both back, avoiding duplicate tokens.
+			if len(messages) > 0 {
+				if previous, ok := messages[len(messages)-1].(map[string]any); ok &&
+					asString(previous["role"]) == "user" &&
+					strings.TrimSpace(messageText(previous["content"])) == summary {
+					messages = messages[:len(messages)-1]
+				}
+			}
+			messages = append(messages, summarySystemMessage(summary))
 		case "item_reference":
 			// References require server-side conversation state, which this Chat
 			// bridge does not have. Codex normally sends the expanded history.

@@ -116,6 +116,7 @@ $env:GATEWAY_PASSWORDLESS = "true"
 
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /v1/responses/compact`
 - `POST /v1/messages`
 - `GET /v1/models`
 - `GET /healthz`
@@ -134,6 +135,8 @@ model_auto_compact_token_limit = 900000
 ```
 
 `max_input` 目前只用于控制台模型信息展示，不是网关侧硬限制。最终可用上下文仍受实际 CodeBuddy 上游模型限制；如果上游拒绝超长请求，网关会保留上游错误而不会静默截断历史。
+
+`/v1/responses/compact` 会调用上游生成会话摘要，并返回 `response.compaction`。由于 CodeBuddy 上游不是 OpenAI 原生 Responses 服务，网关使用自身的不透明摘要封装保存 compact 内容；后续由同一网关接收时可以继续还原，不能与其它网关实例互换。`previous_response_id` 仅支持当前网关进程内已生成的 compact response。
 
 ## 登录与账号
 
