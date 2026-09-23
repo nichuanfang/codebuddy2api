@@ -2,7 +2,11 @@ package db
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"codebuddy-gateway/global"
 
@@ -71,18 +75,31 @@ func GetDB() *gorm.DB {
 	return instance
 }
 
-// getLogMode 获取日志模式
+// getLogMode 获取日志模式。空值和未知值默认只记录错误，避免最小配置意外
+// 打开 GORM info 日志，把账号令牌、请求预览等 SQL 参数写入 stdout。
 func getLogMode(mode string) logger.LogLevel {
-	switch mode {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "silent":
 		return logger.Silent
-	case "error":
-		return logger.Error
 	case "warn":
 		return logger.Warn
 	case "info":
 		return logger.Info
 	default:
-		return logger.Info
+		return logger.Error
 	}
+}
+
+func gormLoggerConfig(mode string) logger.Config {
+	return logger.Config{
+		SlowThreshold:             200 * time.Millisecond,
+		LogLevel:                  getLogMode(mode),
+		IgnoreRecordNotFoundError: true,
+		Colorful:                  false,
+		ParameterizedQueries:      true,
+	}
+}
+
+func newGormLogger(mode string) logger.Interface {
+	return logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), gormLoggerConfig(mode))
 }

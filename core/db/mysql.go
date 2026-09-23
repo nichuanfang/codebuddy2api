@@ -7,7 +7,6 @@ import (
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 // Mysql MySQL 数据库
@@ -19,7 +18,7 @@ func (m *Mysql) Connect() *gorm.DB {
 	dsn := cfg.Dsn()
 
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger:                                   logger.Default.LogMode(getLogMode(cfg.LogMode)),
+		Logger:                                   newGormLogger(cfg.LogMode),
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {

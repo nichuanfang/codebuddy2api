@@ -7,7 +7,6 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 // Pgsql PostgreSQL 数据库
@@ -19,7 +18,7 @@ func (p *Pgsql) Connect() *gorm.DB {
 	dsn := cfg.Dsn()
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger:                                   logger.Default.LogMode(getLogMode(cfg.LogMode)),
+		Logger:                                   newGormLogger(cfg.LogMode),
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {

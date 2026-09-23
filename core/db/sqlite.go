@@ -10,7 +10,6 @@ import (
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 // Sqlite SQLite 数据库
@@ -27,7 +26,7 @@ func (s *Sqlite) Connect() *gorm.DB {
 	}
 
 	db, err := gorm.Open(sqlite.Open(sqliteDSN(cfg.Path)), &gorm.Config{
-		Logger:                                   logger.Default.LogMode(getLogMode(cfg.LogMode)),
+		Logger:                                   newGormLogger(cfg.LogMode),
 		DisableForeignKeyConstraintWhenMigrating: true,
 	})
 	if err != nil {
