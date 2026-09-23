@@ -34,6 +34,16 @@ jobs:
             goos: linux
             goarch: amd64
             archive: codebuddy2api-linux-x64.zip
+          - name: macos-x64
+            os: macos-15-intel
+            goos: darwin
+            goarch: amd64
+            archive: codebuddy2api-macos-x64.zip
+          - name: macos-arm64
+            os: macos-15
+            goos: darwin
+            goarch: arm64
+            archive: codebuddy2api-macos-arm64.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,7 +59,7 @@ jobs:
         shell: pwsh
         run: choco install make --no-progress --yes
 
-      - name: Build the three-file distribution with Makefile
+      - name: Build the user distribution with Makefile
         shell: bash
         env:
           VERSION: ${{ inputs.tag }}
@@ -63,12 +73,13 @@ jobs:
         run: |
           test -f dist/config.yaml
           test -f dist/config.reference.yaml
+          test -f dist/README.md
           if [[ "${{ matrix.goos }}" == "windows" ]]; then
-            test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 5
+            test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 6
             test -f dist/stop.ps1
             test -f dist/start-on-login.vbs
           else
-            test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
+            test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 4
           fi
           test -n "$(find dist -maxdepth 1 -type f -name 'codebuddy-gateway*' -print -quit)"
 
@@ -76,7 +87,18 @@ jobs:
         shell: bash
         run: |
           mkdir -p release
-          7z a -tzip "release/${{ matrix.archive }}" ./dist/*
+          # 非 Windows 需要保留可执行位，优先用 zip；Windows 上 7z 更通用。
+          if [[ "${{ matrix.goos }}" != "windows" ]] && command -v zip >/dev/null 2>&1; then
+            (cd dist && zip -r "../release/${{ matrix.archive }}" ./*)
+          elif command -v 7z >/dev/null 2>&1; then
+            7z a -tzip "release/${{ matrix.archive }}" ./dist/*
+          elif command -v 7zz >/dev/null 2>&1; then
+            7zz a -tzip "release/${{ matrix.archive }}" ./dist/*
+          else
+            echo "no zip/7z available" >&2
+            exit 1
+          fi
+          ls -l "release/${{ matrix.archive }}"
 
       - name: Upload package
         uses: actions/upload-artifact@v4

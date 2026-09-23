@@ -1,10 +1,11 @@
 # CodeBuddy2API 用户交付构建
 #
-# 运行 `make dist` 后，dist/ 包含三件核心交付物和两个可选启动脚本：
+# 运行 `make dist` 后，dist/ 至少包含四件核心交付物：
 #   1. codebuddy-gateway(.exe)     可执行产物
 #   2. config.yaml                 只需修改必要项的配置
 #   3. config.reference.yaml       完整配置参考
 #   4. README.md                   简短使用说明
+# Windows 目标另有 Windows 专属脚本：
 #   5. stop.ps1                    Windows 终止脚本
 #   6. start-on-login.vbs          Windows 开机/登录自启动脚本
 #
@@ -55,12 +56,12 @@ ifeq ($(GOOS),windows)
 	@powershell -NoProfile -Command "Copy-Item -LiteralPath 'stop.ps1' -Destination '$(DIST)/stop.ps1' -Force; Copy-Item -LiteralPath 'start-on-login.vbs' -Destination '$(DIST)/start-on-login.vbs' -Force"
 endif
 else
-	@cp config.dist.yaml "$(DIST)/config.yaml" && cp config.yaml.example "$(DIST)/config.reference.yaml"
+	@cp config.dist.yaml "$(DIST)/config.yaml" && cp config.yaml.example "$(DIST)/config.reference.yaml" && cp README.dist.md "$(DIST)/README.md"
 endif
 ifeq ($(GOOS),windows)
-	@echo "已构建：$(DIST)/（核心产物 + 配置 + Windows 启停脚本）"
+	@echo "已构建：$(DIST)/（核心产物 + 配置 + README + Windows 启停脚本）"
 else
-	@echo "已构建：$(DIST)/（核心产物 + 配置）"
+	@echo "已构建：$(DIST)/（核心产物 + 配置 + README）"
 endif
 
 # 兼容习惯用法：源码编译仍然落到 dist，避免根目录生成容易误用的旧二进制。
