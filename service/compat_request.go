@@ -10,7 +10,7 @@ import (
 )
 
 func PrepareResponsesBody(raw []byte) (*ChatRequestMeta, error) {
-	chat, err := responsesToChat(raw)
+	chat, toolRegistry, err := responsesToChatWithRegistry(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -23,6 +23,7 @@ func PrepareResponsesBody(raw []byte) (*ChatRequestMeta, error) {
 		return nil, err
 	}
 	meta.Protocol = ProtocolResponses
+	meta.ToolRegistry = toolRegistry
 	return meta, nil
 }
 
@@ -99,13 +100,18 @@ func PrepareAnthropicBody(raw []byte) (*ChatRequestMeta, error) {
 }
 
 func responsesToChat(raw []byte) (map[string]any, error) {
+	chat, _, err := responsesToChatWithRegistry(raw)
+	return chat, err
+}
+
+func responsesToChatWithRegistry(raw []byte) (map[string]any, *responseToolRegistry, error) {
 	var src map[string]any
 	if err := json.Unmarshal(raw, &src); err != nil {
-		return nil, fmt.Errorf("invalid json body")
+		return nil, nil, fmt.Errorf("invalid json body")
 	}
 	model, _ := src["model"].(string)
 	if strings.TrimSpace(model) == "" {
-		return nil, fmt.Errorf("model is required")
+		return nil, nil, fmt.Errorf("model is required")
 	}
 	chat := map[string]any{"model": model}
 	copyChatFields(chat, src,
@@ -125,31 +131,32 @@ func responsesToChat(raw []byte) (map[string]any, error) {
 	if previousID := asString(src["previous_response_id"]); previousID != "" {
 		summary, ok := compactStateFor(previousID)
 		if !ok {
-			return nil, fmt.Errorf("previous_response_id %q is not available in this gateway instance", previousID)
+			return nil, nil, fmt.Errorf("previous_response_id %q is not available in this gateway instance", previousID)
 		}
 		messages = append(messages, summarySystemMessage(summary))
 	}
 	if src["instructions"] != nil {
 		inst, err := convertChatContent(src["instructions"])
 		if err != nil {
-			return nil, fmt.Errorf("instructions: %w", err)
+			return nil, nil, fmt.Errorf("instructions: %w", err)
 		}
 		if inst != nil && inst != "" {
 			messages = append(messages, map[string]any{"role": "system", "content": inst})
 		}
 	}
-	convertedInput, err := convertResponsesInput(src["input"])
+	tools, toolRegistry := convertResponsesToolsWithRegistry(src["tools"])
+	convertedInput, err := convertResponsesInputWithRegistry(src["input"], toolRegistry)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	messages = append(messages, convertedInput...)
 	messages = collapseSystemMessagesToHead(messages)
 	if len(messages) == 0 {
-		return nil, fmt.Errorf("responses input must contain at least one message or tool result")
+		return nil, nil, fmt.Errorf("responses input must contain at least one message or tool result")
 	}
 	chat["messages"] = messages
 
-	if tools := convertResponsesTools(src["tools"]); tools != nil {
+	if tools != nil {
 		chat["tools"] = tools
 		if tc := convertResponsesToolChoice(src["tool_choice"]); tc != nil {
 			chat["tool_choice"] = tc
@@ -167,7 +174,7 @@ func responsesToChat(raw []byte) (map[string]any, error) {
 		}
 	}
 	injectUnattendedRuntime(chat)
-	return chat, nil
+	return chat, toolRegistry, nil
 }
 
 func normalizeUpstreamRole(role string) string {
@@ -184,6 +191,10 @@ func normalizeUpstreamRole(role string) string {
 }
 
 func convertResponsesInput(v any) ([]any, error) {
+	return convertResponsesInputWithRegistry(v, nil)
+}
+
+func convertResponsesInputWithRegistry(v any, registry *responseToolRegistry) ([]any, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -244,7 +255,7 @@ func convertResponsesInput(v any) ([]any, error) {
 		role := asString(m["role"])
 		switch typ {
 		case "function_call", "custom_tool_call":
-			pendingCalls = append(pendingCalls, responsesFunctionCallToToolCall(m))
+			pendingCalls = append(pendingCalls, responsesFunctionCallToToolCall(m, registry))
 		case "function_call_output", "tool_result", "custom_tool_call_output":
 			flushCalls()
 			callID := asString(m["call_id"])
@@ -384,12 +395,16 @@ func collapseSystemMessagesToHead(messages []any) []any {
 	return append(out, rest...)
 }
 
-func responsesFunctionCallToToolCall(m map[string]any) map[string]any {
+func responsesFunctionCallToToolCall(m map[string]any, registry *responseToolRegistry) map[string]any {
 	id := asString(m["call_id"])
 	if id == "" {
 		id = asString(m["id"])
 	}
 	name := asString(m["name"])
+	var binding *responseToolBinding
+	if registry != nil {
+		name, binding = registry.UpstreamNameFor(name)
+	}
 	args := asString(m["arguments"])
 	if args == "" {
 		if input := m["input"]; input != nil {
@@ -400,7 +415,9 @@ func responsesFunctionCallToToolCall(m map[string]any) map[string]any {
 			}
 		}
 	}
-	if isFreeformTool(name) {
+	if binding != nil && binding.Kind == responseToolCustom {
+		args = ensureCustomJSONArgs(args, binding.InputField)
+	} else if isFreeformTool(name) {
 		args = ensureFreeformJSONArgs(args)
 	}
 	return map[string]any{
@@ -603,55 +620,145 @@ func validateBase64(value string) error {
 	return err
 }
 
-func convertResponsesTools(v any) any {
+func convertResponsesToolsWithRegistry(v any) (any, *responseToolRegistry) {
 	arr, ok := v.([]any)
 	if !ok || len(arr) == 0 {
-		return nil
+		return nil, nil
 	}
-	out := make([]any, 0, len(arr))
+	candidates := make([]responseToolCandidate, 0, len(arr))
 	for _, item := range arr {
-		out = append(out, convertOneResponsesTool(item, "")...)
+		collectResponseToolCandidates(item, "", &candidates)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	registry := newResponseToolRegistry(candidates)
+	out := make([]any, 0, len(candidates))
+	for _, candidate := range candidates {
+		binding := registry.bindingForCandidate(candidate)
+		if binding == nil {
+			continue
+		}
+		var tool map[string]any
+		if candidate.Kind == responseToolCustom {
+			tool = customToolToFunction(candidate.Raw, "")
+		} else if _, ok := candidate.Raw["function"]; ok {
+			tool = cloneToolMap(candidate.Raw)
+		} else {
+			tool = functionToolFromMap(candidate.Raw, "")
+		}
+		if tool == nil {
+			continue
+		}
+		fn, _ := tool["function"].(map[string]any)
+		if fn == nil {
+			continue
+		}
+		fn["name"] = binding.UpstreamName
+		out = append(out, tool)
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, registry
 }
 
-func convertOneResponsesTool(item any, prefix string) []any {
+type responseToolCandidate struct {
+	Raw           map[string]any
+	ClientName    string
+	QualifiedName string
+	Kind          string
+	InputField    string
+}
+
+const (
+	responseToolFunction = "function"
+	responseToolCustom   = "custom"
+)
+
+func collectResponseToolCandidates(item any, prefix string, out *[]responseToolCandidate) {
 	m, _ := item.(map[string]any)
 	if m == nil {
-		return nil
+		return
 	}
-	if _, ok := m["function"]; ok {
-		return []any{m}
+	if fn, ok := m["function"].(map[string]any); ok {
+		name := asString(fn["name"])
+		if name != "" {
+			qualified := joinToolName(prefix, name)
+			*out = append(*out, responseToolCandidate{Raw: m, ClientName: name, QualifiedName: qualified, Kind: responseToolFunction})
+		}
+		return
 	}
 	typ := asString(m["type"])
 	switch typ {
 	case "namespace":
-		childPrefix := asString(m["name"])
-		if prefix != "" && childPrefix != "" {
-			childPrefix = prefix + "__" + childPrefix
-		}
+		name := asString(m["name"])
+		childPrefix := joinToolName(prefix, name)
 		nested, _ := m["tools"].([]any)
-		out := make([]any, 0, len(nested))
 		for _, child := range nested {
-			out = append(out, convertOneResponsesTool(child, childPrefix)...)
+			collectResponseToolCandidates(child, childPrefix, out)
 		}
-		return out
-	case "custom":
-		if fn := customToolToFunction(m, prefix); fn != nil {
-			return []any{fn}
+	case "custom", "function", "":
+		name := asString(m["name"])
+		if name == "" {
+			return
 		}
-		return nil
-	case "", "function":
-		if fn := functionToolFromMap(m, prefix); fn != nil {
-			return []any{fn}
+		kind := responseToolFunction
+		inputField := ""
+		if typ == "custom" {
+			kind = responseToolCustom
+			inputField = customToolInputField(name)
 		}
-		return nil
-	default:
+		*out = append(*out, responseToolCandidate{
+			Raw: m, ClientName: name, QualifiedName: joinToolName(prefix, name),
+			Kind: kind, InputField: inputField,
+		})
+	}
+}
+
+func joinToolName(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	if name == "" {
+		return prefix
+	}
+	return prefix + "__" + name
+}
+
+func cloneToolMap(src map[string]any) map[string]any {
+	if src == nil {
 		return nil
 	}
+	out := make(map[string]any, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func customToolInputField(name string) string {
+	if strings.EqualFold(name, "exec") || strings.HasSuffix(strings.ToLower(name), "__exec") {
+		return "cmd"
+	}
+	return "input"
+}
+
+func ensureCustomJSONArgs(args, field string) string {
+	if field == "" {
+		field = "input"
+	}
+	s := strings.TrimSpace(args)
+	if s == "" {
+		return mustJSON(map[string]string{field: ""})
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(s), &obj) == nil {
+		if _, ok := obj[field]; ok {
+			return s
+		}
+	}
+	return mustJSON(map[string]string{field: args})
 }
 
 func functionToolFromMap(m map[string]any, prefix string) map[string]any {

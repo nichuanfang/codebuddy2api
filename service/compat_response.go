@@ -7,6 +7,8 @@ import (
 
 	"codebuddy-gateway/global"
 
+	"go.uber.org/zap"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -133,6 +135,10 @@ func encodeResponsesCompactionJSON(result *ChatResult) ([]byte, error) {
 }
 
 func encodeResponsesJSON(result *ChatResult) ([]byte, error) {
+	return encodeResponsesJSONWithRegistry(result, nil)
+}
+
+func encodeResponsesJSONWithRegistry(result *ChatResult, registry *responseToolRegistry) ([]byte, error) {
 	if result == nil {
 		result = &ChatResult{}
 	}
@@ -163,19 +169,24 @@ func encodeResponsesJSON(result *ChatResult) ([]byte, error) {
 			},
 		})
 	}
-	for _, tc := range result.ToolCalls {
+	for _, rawTC := range result.ToolCalls {
+		tc := rawTC
+		binding := normalizeResponseToolCall(&tc, registry)
+		if registry != nil && binding == nil && tc.Name != "" {
+			global.CORE_LOG.Warn("upstream returned unknown Responses tool name", zap.String("model", result.Model), zap.String("tool", tc.Name))
+		}
 		callID := tc.ID
 		if callID == "" {
 			callID = newID("call_")
 		}
-		if isFreeformTool(tc.Name) {
+		if binding != nil && binding.Kind == responseToolCustom || binding == nil && isFreeformTool(tc.Name) {
 			output = append(output, map[string]any{
 				"id":      newID("ctc_"),
 				"type":    "custom_tool_call",
 				"status":  "completed",
 				"call_id": callID,
 				"name":    tc.Name,
-				"input":   unwrapFreeformArgs(tc.Arguments),
+				"input":   unwrapCustomResponseArgs(tc.Arguments, binding),
 			})
 			continue
 		}

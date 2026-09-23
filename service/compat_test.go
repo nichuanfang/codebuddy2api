@@ -45,7 +45,7 @@ func TestPrepareResponsesBody(t *testing.T) {
 		t.Fatalf("messages=%v", msgs)
 	}
 	sys, _ := msgs[0].(map[string]any)
-	if sys["role"] != "system" || sys["content"] != "you are helpful" {
+	if sys["role"] != "system" || !strings.Contains(asString(sys["content"]), "you are helpful") {
 		t.Fatalf("system=%v", sys)
 	}
 	user, _ := msgs[1].(map[string]any)
@@ -623,8 +623,122 @@ func TestConvertNamespaceAndCustomTools(t *testing.T) {
 		names = append(names, fn["name"].(string))
 	}
 	joined := strings.Join(names, ",")
-	if joined != "wait,exec,multi_agent_v1__spawn_agent" {
+	if joined != "wait,exec,spawn_agent" {
 		t.Fatalf("tools=%s full=%v", joined, tools)
+	}
+}
+
+func TestResponseToolRegistryNormalizesMCPAliases(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"deepseek-v4.1-flash",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"lookup"}]},
+			{"type":"function_call","call_id":"call_ctx","name":"mcp__context7__resolve_library_id","arguments":"{\"libraryName\":\"Spring Boot\"}"}
+		],
+		"tools":[{"type":"namespace","name":"context7","tools":[
+			{"type":"function","name":"resolve_library_id","parameters":{"type":"object"}},
+			{"type":"function","name":"query_docs","parameters":{"type":"object"}}
+		]}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	tools := body["tools"].([]any)
+	if got := tools[0].(map[string]any)["function"].(map[string]any)["name"]; got != "resolve_library_id" {
+		t.Fatalf("tool name=%v", got)
+	}
+	messages := body["messages"].([]any)
+	assistant := messages[len(messages)-1].(map[string]any)
+	calls := assistant["tool_calls"].([]any)
+	fn := calls[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "resolve_library_id" {
+		t.Fatalf("mapped call name=%v", fn["name"])
+	}
+}
+
+func TestResponseToolRegistryUsesQualifiedNamesOnCollision(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"lookup"}]}],
+		"tools":[
+			{"type":"namespace","name":"one","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]},
+			{"type":"namespace","name":"two","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	tools := body["tools"].([]any)
+	got := []string{
+		tools[0].(map[string]any)["function"].(map[string]any)["name"].(string),
+		tools[1].(map[string]any)["function"].(map[string]any)["name"].(string),
+	}
+	if strings.Join(got, ",") != "one__lookup,two__lookup" {
+		t.Fatalf("qualified names=%v", got)
+	}
+}
+
+func TestCustomToolRegistryRoundTripForExec(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	payload := map[string]any{
+		"model": "deepseek-v4.1-flash",
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "run"}}},
+			map[string]any{"type": "custom_tool_call", "call_id": "call_exec", "name": "exec", "input": "Get-ChildItem"},
+		},
+		"tools": []any{map[string]any{"type": "custom", "name": "exec", "description": "run command"}},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := PrepareResponsesBody(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	assistant := messages[len(messages)-1].(map[string]any)
+	call := assistant["tool_calls"].([]any)[0].(map[string]any)
+	if call["function"].(map[string]any)["name"] != "exec" {
+		t.Fatalf("call=%v", call)
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(call["function"].(map[string]any)["arguments"].(string)), &args); err != nil {
+		t.Fatal(err)
+	}
+	if args["cmd"] != "Get-ChildItem" {
+		t.Fatalf("args=%v", args)
+	}
+	encoded, err := encodeResponsesJSONWithRegistry(&ChatResult{
+		Model:        "deepseek-v4.1-flash",
+		ToolCalls:    []AggregatedToolCall{{ID: "call_exec", Name: "exec", Arguments: `{"cmd":"Get-ChildItem"}`}},
+		FinishReason: "tool_calls",
+		Usage:        &parsedUsage{},
+	}, meta.ToolRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(encoded, &response); err != nil {
+		t.Fatal(err)
+	}
+	output := response["output"].([]any)[0].(map[string]any)
+	if output["type"] != "custom_tool_call" || output["name"] != "exec" || output["input"] != "Get-ChildItem" {
+		t.Fatalf("output=%v", output)
 	}
 }
 
@@ -850,6 +964,33 @@ func TestResponsesStreamApplyPatchEmitsCustomToolCall(t *testing.T) {
 	}
 	if strings.Contains(s, `"type":"custom_tool_call"`) {
 		t.Fatalf("exec_command leaked as custom: %s", s)
+	}
+}
+
+func TestResponsesStreamRegistryNormalizesMCPToolName(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	tools, registry := convertResponsesToolsWithRegistry([]any{
+		map[string]any{"type": "namespace", "name": "context7", "tools": []any{
+			map[string]any{"type": "function", "name": "resolve_library_id", "parameters": map[string]any{"type": "object"}},
+		}},
+	})
+	if tools == nil || registry == nil {
+		t.Fatal("expected converted tools and registry")
+	}
+	var buf bytes.Buffer
+	ad := newStreamAdapterWithRegistry(ProtocolResponses, &buf, nil, "deepseek-v4.1-flash", registry)
+	ad.start()
+	ad.onToolCall(AggregatedToolCall{Index: 0, ID: "call_ctx", Name: "mcp__context7__resolve_library_id", Arguments: `{"libraryName":"Spring Boot"}`})
+	ad.onFinishReason("tool_calls")
+	if err := ad.finish(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.String()
+	if !strings.Contains(raw, `"type":"function_call"`) || !strings.Contains(raw, `"name":"resolve_library_id"`) {
+		t.Fatalf("normalized stream=%s", raw)
+	}
+	if strings.Contains(raw, "mcp__context7__resolve_library_id") {
+		t.Fatalf("upstream alias leaked into stream=%s", raw)
 	}
 }
 

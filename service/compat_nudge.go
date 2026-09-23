@@ -19,10 +19,12 @@ const unattendedRuntimeNote = `Runtime: keep calling tools until the user's requ
 
 const modelExecutionNote = `Do not end a turn with a statement about an action you are about to take. If you say you will inspect, edit, run, rebuild, commit, or continue, call the corresponding tool in the same response. Only stop when the task is complete or a concrete blocker requires user input.`
 
+const toolNameExecutionNote = `Use only the exact tool names provided in the tool list. Do not add mcp__, server, or namespace prefixes to a tool name. If a tool is needed, call it now instead of describing the intended call.`
+
 const applyPatchJSONHint = `When calling this tool, put the complete patch text in the "input" argument. The patch text must start with "*** Begin Patch" and end with "*** End Patch".`
 
 func injectUnattendedRuntime(chat map[string]any) {
-	if chat == nil || !chatHasFreeformTool(chat) {
+	if chat == nil || !chatHasCallableTools(chat) {
 		return
 	}
 	model := asString(chat["model"])
@@ -37,6 +39,7 @@ func injectUnattendedRuntime(chat map[string]any) {
 	msgs = moveSystemMessagesToHead(msgs)
 	strict := requiresStrictExecution(model)
 	needRuntime, needStrict := true, strict
+	needToolNames := strict
 	for _, raw := range msgs {
 		message, _ := raw.(map[string]any)
 		if message == nil || asString(message["role"]) != "system" {
@@ -49,8 +52,11 @@ func injectUnattendedRuntime(chat map[string]any) {
 		if strings.Contains(content, modelExecutionNote) {
 			needStrict = false
 		}
+		if strings.Contains(content, toolNameExecutionNote) {
+			needToolNames = false
+		}
 	}
-	if !needRuntime && !needStrict {
+	if !needRuntime && !needStrict && !needToolNames {
 		chat["messages"] = msgs
 		return
 	}
@@ -61,6 +67,9 @@ func injectUnattendedRuntime(chat map[string]any) {
 	}
 	if needStrict {
 		notes = append(notes, modelExecutionNote)
+	}
+	if needToolNames {
+		notes = append(notes, toolNameExecutionNote)
 	}
 	injected := strings.Join(notes, "\n\n")
 	if len(msgs) > 0 {
@@ -118,18 +127,14 @@ func requiresStrictExecution(model string) bool {
 	return policyForModel(model).strictPrompt
 }
 
-func chatHasFreeformTool(chat map[string]any) bool {
+func chatHasCallableTools(chat map[string]any) bool {
 	tools, _ := chat["tools"].([]any)
 	for _, item := range tools {
 		m, _ := item.(map[string]any)
 		if m == nil {
 			continue
 		}
-		fn, _ := m["function"].(map[string]any)
-		if fn == nil {
-			continue
-		}
-		if isFreeformTool(asString(fn["name"])) {
+		if fn, _ := m["function"].(map[string]any); fn != nil && strings.TrimSpace(asString(fn["name"])) != "" {
 			return true
 		}
 	}

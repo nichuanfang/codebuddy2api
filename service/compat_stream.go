@@ -14,6 +14,8 @@ import (
 
 	"codebuddy-gateway/global"
 
+	"go.uber.org/zap"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -42,6 +44,10 @@ type toolStreamState struct {
 }
 
 func newStreamAdapter(proto Protocol, w io.Writer, flusher http.Flusher, model string) streamAdapter {
+	return newStreamAdapterWithRegistry(proto, w, flusher, model, nil)
+}
+
+func newStreamAdapterWithRegistry(proto Protocol, w io.Writer, flusher http.Flusher, model string, registry *responseToolRegistry) streamAdapter {
 	if proto.IsAnthropic() {
 		return &anthropicAdapter{
 			w:       w,
@@ -53,12 +59,14 @@ func newStreamAdapter(proto Protocol, w io.Writer, flusher http.Flusher, model s
 		}
 	}
 	return &responsesAdapter{
-		w:       w,
-		flusher: flusher,
-		id:      newID("resp_"),
-		model:   model,
-		created: time.Now().Unix(),
-		tools:   map[int]*toolStreamState{},
+		w:            w,
+		flusher:      flusher,
+		id:           newID("resp_"),
+		model:        model,
+		created:      time.Now().Unix(),
+		tools:        map[int]*toolStreamState{},
+		registry:     registry,
+		unknownTools: make(map[string]struct{}),
 	}
 }
 
@@ -158,6 +166,8 @@ type responsesAdapter struct {
 	toolSegments      []*toolStreamState
 	tools             map[int]*toolStreamState
 	toolOrder         []int
+	registry          *responseToolRegistry
+	unknownTools      map[string]struct{}
 	usage             *parsedUsage
 	finishReason      string
 }
@@ -328,10 +338,22 @@ func (a *responsesAdapter) onToolCall(tc AggregatedToolCall) {
 	if tc.Name != "" {
 		st.name = tc.Name
 	}
+	var binding *responseToolBinding
+	if a.registry != nil {
+		if b, ok := a.registry.ClientNameFor(st.name); ok {
+			binding = b
+			st.name = b.ClientName
+		} else if st.name != "" {
+			if _, seen := a.unknownTools[toolNameKey(st.name)]; !seen {
+				a.unknownTools[toolNameKey(st.name)] = struct{}{}
+				global.CORE_LOG.Warn("upstream returned unknown Responses tool name", zap.String("model", a.model), zap.String("tool", st.name))
+			}
+		}
+	}
 	if tc.Arguments != "" {
 		st.args += tc.Arguments
 	}
-	if isFreeformTool(st.name) || st.name == "" {
+	if (binding != nil && binding.Kind == responseToolCustom) || (binding == nil && isFreeformTool(st.name)) || st.name == "" {
 		return
 	}
 	if !st.opened {
@@ -383,7 +405,11 @@ func (a *responsesAdapter) emitCustomToolCall(st *toolStreamState) {
 	if st.itemID == "" {
 		st.itemID = newID("ctc_")
 	}
-	input := unwrapFreeformArgs(st.args)
+	var binding *responseToolBinding
+	if a.registry != nil {
+		binding, _ = a.registry.ClientNameFor(st.name)
+	}
+	input := unwrapCustomResponseArgs(st.args, binding)
 	st.args = input
 	a.emit("response.output_item.added", map[string]any{
 		"output_index": st.outputIndex,
@@ -429,7 +455,8 @@ func (a *responsesAdapter) closeTools() {
 		if st == nil || st.closed {
 			continue
 		}
-		if isFreeformTool(st.name) {
+		binding, _ := a.registry.ClientNameFor(st.name)
+		if (binding != nil && binding.Kind == responseToolCustom) || (binding == nil && isFreeformTool(st.name)) {
 			a.emitCustomToolCall(st)
 			continue
 		}
@@ -558,10 +585,11 @@ func (a *responsesAdapter) full(status string) map[string]any {
 		if st == nil {
 			continue
 		}
-		if isFreeformTool(st.name) {
+		binding, _ := a.registry.ClientNameFor(st.name)
+		if (binding != nil && binding.Kind == responseToolCustom) || (binding == nil && isFreeformTool(st.name)) {
 			entries = append(entries, outputEntry{index: st.outputIndex, item: map[string]any{
 				"id": st.itemID, "type": "custom_tool_call", "status": "completed", "call_id": st.callID,
-				"name": st.name, "input": unwrapFreeformArgs(st.args),
+				"name": st.name, "input": unwrapCustomResponseArgs(st.args, binding),
 			}})
 		} else {
 			entries = append(entries, outputEntry{index: st.outputIndex, item: map[string]any{
@@ -868,7 +896,7 @@ func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatR
 		if meta.Compact {
 			encoded, err = encodeResponsesCompactionJSON(result)
 		} else {
-			encoded, err = encodeResponsesJSON(result)
+			encoded, err = encodeResponsesJSONWithRegistry(result, meta.ToolRegistry)
 		}
 	}
 	if err != nil {
@@ -896,7 +924,7 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 
 	// sseSink flushes exactly once per write; passing nil avoids a second flush
 	// from writeSSEEvent.
-	em := newStreamAdapter(meta.Protocol, sink, nil, meta.RequestedModel)
+	em := newStreamAdapterWithRegistry(meta.Protocol, sink, nil, meta.RequestedModel, meta.ToolRegistry)
 	em.start()
 
 	decoder := newSSEDecoder(resp.Body)

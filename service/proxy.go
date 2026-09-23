@@ -42,6 +42,7 @@ type ChatRequestMeta struct {
 	RequestPreview string
 	AffinityKey    string
 	Compact        bool
+	ToolRegistry   *responseToolRegistry
 }
 
 func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
