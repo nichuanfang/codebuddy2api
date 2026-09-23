@@ -24,26 +24,34 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # upload_delay 为该平台上传 artifact 前的等待秒数：4 个平台构建耗时可观
+          # 且几乎同时完成，上传时刻天然挤在一起，会集中冲击
+          # ArtifactService/CreateArtifact 并超时（actions/upload-artifact#569）。
+          # 用递增延迟把上传窗口错开，构建仍并行，不改动整体结构。
           - name: windows-x64
             os: windows-latest
             goos: windows
             goarch: amd64
             archive: codebuddy2api-windows-x64.zip
+            upload_delay: 0
           - name: linux-x64
             os: ubuntu-latest
             goos: linux
             goarch: amd64
             archive: codebuddy2api-linux-x64.zip
+            upload_delay: 45
           - name: macos-x64
             os: macos-15-intel
             goos: darwin
             goarch: amd64
             archive: codebuddy2api-macos-x64.zip
+            upload_delay: 90
           - name: macos-arm64
             os: macos-15
             goos: darwin
             goarch: arm64
             archive: codebuddy2api-macos-arm64.zip
+            upload_delay: 135
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,6 +107,17 @@ jobs:
             exit 1
           fi
           ls -l "release/${{ matrix.archive }}"
+
+      - name: Stagger upload window
+        shell: bash
+        run: |
+          delay=${{ matrix.upload_delay }}
+          if [[ "${delay}" -gt 0 ]]; then
+            echo "错峰等待 ${delay}s，避开其它平台的上传窗口"
+            sleep "${delay}"
+          else
+            echo "首个平台，直接上传"
+          fi
 
       - name: Upload package
         uses: actions/upload-artifact@v4
