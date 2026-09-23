@@ -17,6 +17,8 @@ import (
 	"go.uber.org/zap"
 )
 
+const statusClientClosedRequest = 499
+
 var errRequestBodyTooLarge = errors.New("request body exceeds 32 MiB")
 
 type Proxy struct {
@@ -207,6 +209,9 @@ func (p *Proxy) countTokensUpstream(ctx context.Context, headers http.Header, ra
 		resp, cancel, err := p.doUpstreamAttempt(ctx, acc, "/v2/chat/completions", encoded)
 		if err != nil {
 			lastErr = err
+			if downstreamRequestCanceled(ctx, err) {
+				return 0, err
+			}
 			p.rotator.MarkFailure(acc, err.Error())
 			continue
 		}
@@ -334,6 +339,11 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 		resp, cancel, err := p.doUpstreamAttempt(c.Request.Context(), acc, path, meta.Body)
 		if err != nil {
 			lastErr = err.Error()
+			if downstreamRequestCanceled(c.Request.Context(), err) {
+				c.Status(statusClientClosedRequest)
+				p.recordUsage(acc, meta, start, statusClientClosedRequest, lastErr, nil)
+				return
+			}
 			p.rotator.MarkFailure(acc, lastErr)
 			continue
 		}
@@ -350,6 +360,11 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			resp, cancel, err = p.doUpstreamAttempt(c.Request.Context(), acc, path, meta.Body)
 			if err != nil {
 				lastErr = err.Error()
+				if downstreamRequestCanceled(c.Request.Context(), err) {
+					c.Status(statusClientClosedRequest)
+					p.recordUsage(acc, meta, start, statusClientClosedRequest, lastErr, nil)
+					return
+				}
 				p.rotator.MarkFailure(acc, lastErr)
 				continue
 			}
@@ -443,7 +458,7 @@ func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Res
 		errMsg = writeErr.Error()
 		switch {
 		case errors.Is(writeErr, errDownstreamWrite):
-			status = 499
+			status = statusClientClosedRequest
 		case errors.Is(writeErr, errUpstreamStream):
 			status = http.StatusBadGateway
 			p.rotator.MarkFailure(acc, errMsg)
@@ -458,6 +473,13 @@ func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Res
 		p.rotator.MarkSuccessFor(acc, meta.UpstreamModel)
 	}
 	p.recordUsage(acc, meta, start, status, errMsg, usage)
+}
+
+func downstreamRequestCanceled(ctx context.Context, err error) bool {
+	if ctx == nil || ctx.Err() == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (p *Proxy) doUpstreamAttempt(parent context.Context, acc *model.Account, path string, body []byte) (*http.Response, context.CancelFunc, error) {
