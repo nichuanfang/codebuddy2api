@@ -265,6 +265,7 @@ func TestClassifyUpstreamRejection(t *testing.T) {
 		{"unapproved-text", `{"msg":"unapproved channel"}`, rejectionUnapprovedChannel},
 		{"model-11102", `{"code":11102,"msg":"model is only available for authorized users"}`, rejectionModelUnauthorized},
 		{"content-filter", `{"code":12200,"msg":"content filter triggered"}`, rejectionContentFiltered},
+		{"invalid-request-11133", `{"code":11133,"msg":"the request parameters were rejected by the model provider"}`, rejectionInvalidRequest},
 		{"ok", `{"code":0,"msg":"ok"}`, rejectionNone},
 		{"empty", ``, rejectionNone},
 	}

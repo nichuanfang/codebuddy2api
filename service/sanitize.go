@@ -853,6 +853,8 @@ const (
 	rejectionModelUnauthorized
 	// rejectionContentFiltered：内容审核命中（非 channel 类）。
 	rejectionContentFiltered
+	// rejectionInvalidRequest：11133 等参数/请求结构错误。
+	rejectionInvalidRequest
 )
 
 // contentFilteredMarkers 内容审核命中的文案特征。
@@ -886,10 +888,18 @@ func classifyUpstreamRejection(raw []byte) rejectionKind {
 	if strings.Contains(s, "11102") {
 		return rejectionModelUnauthorized
 	}
+	if strings.Contains(s, "11133") {
+		return rejectionInvalidRequest
+	}
 	if strings.Contains(low, "only available for authorized users") ||
 		strings.Contains(low, "the requested model is not available") ||
 		strings.Contains(low, "model is not available") {
 		return rejectionModelUnauthorized
+	}
+	if strings.Contains(low, "request parameters were rejected") ||
+		strings.Contains(low, "invalid request parameter") ||
+		strings.Contains(low, "invalid request parameters") {
+		return rejectionInvalidRequest
 	}
 	for _, marker := range contentFilteredMarkers {
 		if strings.Contains(low, marker) {
@@ -904,7 +914,7 @@ func isModelQuotaExhausted(status int, raw []byte) bool {
 		return true
 	}
 	kind := classifyUpstreamRejection(raw)
-	if kind == rejectionUnapprovedChannel || kind == rejectionModelUnauthorized {
+	if kind == rejectionUnapprovedChannel || kind == rejectionModelUnauthorized || kind == rejectionInvalidRequest {
 		return false
 	}
 	s := strings.ToLower(string(raw))
