@@ -645,7 +645,7 @@ func (a *responsesAdapter) full(status string) map[string]any {
 	for _, entry := range entries {
 		output = append(output, entry.item)
 	}
-	if len(output) == 0 {
+	if len(output) == 0 && status != "failed" {
 		output = append(output, map[string]any{
 			"id": newID("msg_"), "type": "message", "status": "completed", "role": "assistant",
 			"content": []any{map[string]any{"type": "output_text", "text": ""}},
@@ -674,7 +674,12 @@ func (a *responsesAdapter) fail(err error) error {
 	a.closeText()
 	a.closeTools()
 	response := a.full("failed")
-	response["error"] = map[string]any{"code": "upstream_stream_error", "message": err.Error()}
+	code, message := "upstream_stream_error", err.Error()
+	var upstreamErr *upstreamSSEError
+	if errors.As(err, &upstreamErr) {
+		code, message = upstreamErr.code, upstreamErr.message
+	}
+	response["error"] = map[string]any{"code": code, "message": message}
 	a.emit("response.failed", map[string]any{"response": response})
 	return a.err
 }
@@ -947,8 +952,19 @@ func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatR
 	}
 	c.Header("Content-Type", "application/json")
 	c.Status(http.StatusOK)
-	if _, writeErr := c.Writer.Write(stripInvisibleFromFrame(encoded)); writeErr != nil {
+	written := stripInvisibleFromFrame(encoded)
+	count, writeErr := c.Writer.Write(written)
+	if writeErr != nil {
 		return result.Usage, wrapDownstreamWrite(writeErr)
+	}
+	if count != len(written) {
+		return result.Usage, wrapDownstreamWrite(io.ErrShortWrite)
+	}
+	if meta.Protocol == ProtocolResponses && !meta.Compact && p.history != nil {
+		var final map[string]any
+		if json.Unmarshal(written, &final) == nil {
+			p.history.record(final, meta.historyScope)
+		}
 	}
 	return result.Usage, nil
 }
@@ -999,6 +1015,12 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
 		}
 		watchdog.touch()
+		if upstreamErr := event.upstreamError(); upstreamErr != nil {
+			failure := wrapUpstreamStream(upstreamErr)
+			em.setUsage(usageWithStreamMeta(usage, collector, firstTokenMs, reqID))
+			_ = em.fail(failure)
+			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
+		}
 		if event.Done {
 			break
 		}
@@ -1034,7 +1056,15 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 	if finishReason != "" {
 		em.onFinishReason(finishReason)
 	}
-	return usage, em.finish()
+	if err := em.finish(); err != nil {
+		return usage, err
+	}
+	if meta.Protocol == ProtocolResponses && !meta.Compact && p.history != nil && !responsesFinishReasonIsLength(finishReason) {
+		if adapter, ok := em.(*responsesAdapter); ok {
+			p.history.record(adapter.full("completed"), meta.historyScope)
+		}
+	}
+	return usage, nil
 }
 
 // sseHeartbeatInterval 是心跳间隔。取 15s 是为了留足余量：

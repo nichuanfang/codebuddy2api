@@ -78,6 +78,9 @@ func collectSSEWithStart(r io.Reader, requestedModel string, streamStart time.Ti
 		if err != nil {
 			return nil, err
 		}
+		if upstreamErr := event.upstreamError(); upstreamErr != nil {
+			return nil, upstreamErr
+		}
 		if event.Done {
 			normalTermination = true
 			break

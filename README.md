@@ -157,7 +157,9 @@ model_auto_compact_token_limit = 900000
 
 `max_input` 目前只用于控制台模型信息展示，不是网关侧硬限制。最终可用上下文仍受实际 CodeBuddy 上游模型限制；如果上游拒绝超长请求，网关会保留上游错误而不会静默截断历史。
 
-`/v1/responses/compact` 会调用上游生成会话摘要，并返回 `response.compaction`。由于 CodeBuddy 上游不是 OpenAI 原生 Responses 服务，网关使用自身的不透明摘要封装保存 compact 内容；后续由同一网关接收时可以继续还原，不能与其它网关实例互换。`previous_response_id` 仅支持当前网关进程内已生成的 compact response。
+`/v1/responses/compact` 会调用上游生成会话摘要，并返回 `response.compaction`。由于 CodeBuddy 上游不是 OpenAI 原生 Responses 服务，网关使用自身的不透明摘要封装保存 compact 内容；后续由同一网关接收时可以继续还原，不能与其它网关实例互换。
+
+普通 `/v1/responses` 的 `previous_response_id` 仅用于恢复网关先前返回、但客户端未在后续 `input` 中重传的 function/custom 工具调用及相关 reasoning，**不提供完整的服务端会话续接**。普通消息的其余历史仍须由客户端提供；未知的普通 response ID 不会自动补全对话，缺失对应调用的工具结果会返回 400。工具历史按调用方凭据及可用会话标识隔离，使用 `X-Session-Id` 等标识时请在后续请求中保持一致；没有会话标识时只能通过明确的 `previous_response_id` 恢复，不能仅凭 `call_id` 猜测。缓存仅存在于当前进程（最多 512 条、总量 64 MiB、单条 1 MiB、有效期 2 小时），重启或淘汰后失效；compact 摘要的现有进程内恢复行为保持不变。上游 SSE 错误会终止响应，不会被当作成功的空回复。
 
 ## 登录与账号
 

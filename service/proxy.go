@@ -25,10 +25,11 @@ type Proxy struct {
 	client    *UpstreamClient
 	rotator   *Rotator
 	refresher *Refresher
+	history   *responseHistoryStore
 }
 
 func NewProxy(client *UpstreamClient, rotator *Rotator, refresher *Refresher) *Proxy {
-	return &Proxy{client: client, rotator: rotator, refresher: refresher}
+	return &Proxy{client: client, rotator: rotator, refresher: refresher, history: newResponseHistoryStore()}
 }
 
 type ChatRequestMeta struct {
@@ -43,6 +44,7 @@ type ChatRequestMeta struct {
 	AffinityKey    string
 	Compact        bool
 	ToolRegistry   *responseToolRegistry
+	historyScope   responseHistoryScope
 	// ResponsesDowngradedTools records hosted/unknown Responses tools omitted
 	// before forwarding to the Chat Completions upstream.
 	ResponsesDowngradedTools []string
@@ -119,6 +121,14 @@ func (p *Proxy) HandleResponses(c *gin.Context) {
 		gatewayError(c, ProtocolResponses, status, err.Error())
 		return
 	}
+	scope := historyScopeFor(c.Request.Header, c.Query("api_key"), raw)
+	if p.history != nil {
+		raw, err = p.history.enrich(raw, scope)
+		if err != nil {
+			gatewayErrorWithDetails(c, ProtocolResponses, http.StatusBadRequest, err.Error(), "invalid_request_error", "input", requestIDFromContext(c))
+			return
+		}
+	}
 	meta, err := PrepareResponsesBody(raw)
 	if err != nil {
 		logResponsesPrepareError(c, raw, err)
@@ -126,6 +136,7 @@ func (p *Proxy) HandleResponses(c *gin.Context) {
 		return
 	}
 	attachClientMeta(c, meta)
+	meta.historyScope = scope
 	logResponsesDowngrade(meta, c)
 	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
@@ -541,12 +552,21 @@ func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Res
 		}
 		global.CORE_LOG.Warn("write upstream response failed", zap.Int("status", status), zap.Error(writeErr))
 		if !c.Writer.Written() {
-			gatewayError(c, meta.Protocol, status, errMsg)
+			writeRelayFailure(c, meta.Protocol, status, writeErr)
 		}
 	} else {
 		p.rotator.MarkSuccessFor(acc, meta.UpstreamModel)
 	}
 	p.recordUsage(acc, meta, start, status, errMsg, usage)
+}
+
+func writeRelayFailure(c *gin.Context, proto Protocol, status int, err error) {
+	var upstreamErr *upstreamSSEError
+	if proto == ProtocolResponses && errors.As(err, &upstreamErr) {
+		gatewayErrorWithDetails(c, proto, status, upstreamErr.message, upstreamErr.code, "", "")
+		return
+	}
+	gatewayError(c, proto, status, err.Error())
 }
 
 func downstreamRequestCanceled(ctx context.Context, err error) bool {

@@ -18,6 +18,7 @@ var (
 )
 
 type sseEvent struct {
+	Event        string
 	Data         string
 	Chunk        map[string]any
 	Done         bool
@@ -30,6 +31,7 @@ type sseDecoder struct {
 	eventSize int
 	data      []string
 	pending   string
+	eventName string
 }
 
 func newSSEDecoder(r io.Reader) *sseDecoder {
@@ -58,7 +60,8 @@ func (d *sseDecoder) next() (*sseEvent, error) {
 			// A few upstream test/proxy implementations omit the blank line
 			// between one-line data events. If the accumulated data is already
 			// a complete JSON value, dispatch it before retaining this line.
-			if strings.HasPrefix(line, "data:") && len(d.data) > 0 && sseDataComplete(strings.Join(d.data, "\n")) {
+			if (strings.HasPrefix(line, "data:") || strings.HasPrefix(line, "event:")) && len(d.data) > 0 &&
+				sseDataComplete(strings.Join(d.data, "\n")) {
 				ev, parseErr := d.finishEvent()
 				if parseErr != nil {
 					return nil, parseErr
@@ -79,12 +82,15 @@ func (d *sseDecoder) next() (*sseEvent, error) {
 					return ev, nil
 				}
 				d.eventSize = 0
+				d.eventName = ""
 			} else if strings.HasPrefix(line, "data:") {
 				value := strings.TrimPrefix(line, "data:")
 				if strings.HasPrefix(value, " ") {
 					value = value[1:]
 				}
 				d.data = append(d.data, value)
+			} else if strings.HasPrefix(line, "event:") {
+				d.eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 			}
 		}
 		if err != nil {
@@ -110,20 +116,57 @@ func sseDataComplete(data string) bool {
 
 func (d *sseDecoder) finishEvent() (*sseEvent, error) {
 	data := strings.Join(d.data, "\n")
+	eventName := d.eventName
 	d.data = nil
+	d.eventName = ""
 	d.eventSize = 0
 	if strings.TrimSpace(data) == "[DONE]" {
-		return &sseEvent{Data: data, Done: true}, nil
+		return &sseEvent{Event: eventName, Data: data, Done: true}, nil
 	}
 	var chunk map[string]any
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		if eventName == "error" {
+			return &sseEvent{Event: eventName, Data: data}, nil
+		}
 		return nil, fmt.Errorf("%w: %v", errSSEDataMalformed, err)
 	}
 	return &sseEvent{
+		Event:        eventName,
 		Data:         data,
 		Chunk:        chunk,
 		FinishReason: chunkFinishReason(chunk),
 	}, nil
+}
+
+type upstreamSSEError struct {
+	code    string
+	message string
+}
+
+func (e *upstreamSSEError) Error() string { return e.message }
+
+func (e *sseEvent) upstreamError() error {
+	if e == nil || (e.Event != "error" && (e.Chunk == nil || e.Chunk["error"] == nil)) {
+		return nil
+	}
+	info := parseUpstreamError([]byte(e.Data))
+	message := info.Message
+	if message == "" {
+		if text, ok := e.Chunk["error"].(string); ok {
+			message = text
+		}
+	}
+	if message == "" && e.Event == "error" && e.Chunk == nil {
+		message = e.Data
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "upstream reported an error"
+	}
+	code := info.Code
+	if code == "" {
+		code = "upstream_error"
+	}
+	return &upstreamSSEError{code: clipText(code, 80), message: clipText(strings.TrimSpace(message), 500)}
 }
 
 func chunkFinishReason(chunk map[string]any) string {
