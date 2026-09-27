@@ -9,6 +9,11 @@
 #   5. stop.ps1                    Windows 终止脚本
 #   6. start-on-login.vbs          Windows 开机/登录自启动脚本
 #
+# macOS 目标另有 macOS 专属脚本（Finder 中双击即可运行）：
+#   5. stop.command                macOS 停止脚本
+#   6. start-on-login.command      macOS 登录后自启动安装/卸载脚本
+#   7. CodeBuddy2API.app           macOS Finder 双击启动应用
+#
 # 用户不需要安装 Go、gcc 或其它运行时依赖；这些只在从源码构建时需要。
 
 APP       ?= codebuddy-gateway
@@ -57,9 +62,15 @@ ifeq ($(GOOS),windows)
 endif
 else
 	@cp config.dist.yaml "$(DIST)/config.yaml" && cp config.yaml.example "$(DIST)/config.reference.yaml" && cp README.dist.md "$(DIST)/README.md"
+ifeq ($(GOOS),darwin)
+	@cp stop.command "$(DIST)/stop.command" && cp start-on-login.command "$(DIST)/start-on-login.command" && chmod +x "$(DIST)/stop.command" "$(DIST)/start-on-login.command"
+	@mkdir -p "$(DIST)/CodeBuddy2API.app/Contents/MacOS" && cp "$(BINARY)" "$(DIST)/CodeBuddy2API.app/Contents/MacOS/CodeBuddy2API" && cp macos/Info.plist "$(DIST)/CodeBuddy2API.app/Contents/Info.plist" && chmod +x "$(DIST)/CodeBuddy2API.app/Contents/MacOS/CodeBuddy2API"
+endif
 endif
 ifeq ($(GOOS),windows)
 	@echo "已构建：$(DIST)/（核心产物 + 配置 + README + Windows 启停脚本）"
+else ifeq ($(GOOS),darwin)
+	@echo "已构建：$(DIST)/（核心产物 + 配置 + README + macOS 应用与启停脚本）"
 else
 	@echo "已构建：$(DIST)/（核心产物 + 配置 + README）"
 endif

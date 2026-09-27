@@ -10,12 +10,15 @@
 
 ```text
 codebuddy-gateway.exe       # Windows 可执行文件
-codebuddy-gateway           # macOS / Linux 可执行文件
+codebuddy-gateway           # macOS / Linux 命令行可执行文件
+CodeBuddy2API.app           # Finder 双击启动应用（仅 macOS 发布包）
 config.yaml                 # 日常配置：只改必要项
 config.reference.yaml       # 完整配置参考，通常不用改
 README.md                   # 简短上手说明
 stop.ps1                    # 终止后台服务（仅 Windows 包）
 start-on-login.vbs          # 适合放进 Windows 启动目录（仅 Windows 包）
+stop.command                # 停止服务（仅 macOS 包）
+start-on-login.command      # 登录后自启动安装/卸载脚本（仅 macOS 包）
 ```
 
 运行时不需要安装 Go、gcc、Node.js、Python 或数据库。程序会在当前目录自动创建 `data/` 和 `log/`，它们是运行数据，不属于发布包。
@@ -64,21 +67,20 @@ chmod +x ./codebuddy-gateway
 ### macOS 用户
 
 macOS 发布包提供 Intel（x64）与 Apple 芯片（arm64）两个版本，按机器架构下载对应压缩包。
-解压后进入目录，首次运行先赋予执行权限：
+解压后修改同目录的 `config.yaml`，在 Finder 中双击 `CodeBuddy2API.app`，启动逻辑与 Windows 一致：
 
 ```bash
 chmod +x ./codebuddy-gateway
-./codebuddy-gateway
+./codebuddy-gateway server  # 可选：终端前台运行/调试
 ```
 
-首次运行会通过 `open` 自动打开浏览器完成 CodeBuddy 登录；已完成登录后再次启动会直接作为服务运行。
-如果 macOS 提示「无法打开，因为 Apple 无法检查是否包含恶意软件」，可在「系统设置 → 隐私与安全性」
-中点击「仍要打开」，或执行 `xattr -d com.apple.quarantine ./codebuddy-gateway` 移除隔离标记。
+首次双击会自动打开浏览器完成 CodeBuddy 登录，随后后台启动服务；已完成登录后再次双击会提示运行状态。
+若 macOS 阻止首次启动，在 Finder 中按住 Control 点击 `CodeBuddy2API.app`，选「打开」并确认；
+也可执行 `xattr -dr com.apple.quarantine CodeBuddy2API.app`。当前发布包未做 Apple 开发者签名与公证。
 
-停止服务：前台运行时按 `Ctrl+C`；后台运行时用 `pkill -f codebuddy-gateway`。
-
-`stop.ps1` 与 `start-on-login.vbs` 仅适用于 Windows。macOS 如需开机自启，可自行编写
-`launchd` plist；登录态与账号数据同样保存在当前目录的 `data/gateway.db`。
+双击 `stop.command` 可停止服务；双击 `start-on-login.command` 可安装登录后自启动，卸载可执行
+`./start-on-login.command uninstall`。安装自启动后不要移动发行目录；移动后重新运行安装脚本。
+登录态与账号数据保存在发行目录的 `data/gateway.db`。
 
 默认监听 `127.0.0.1:8088`，只允许本机访问；如需局域网访问，再显式改为 `0.0.0.0:8088`，并关闭免密。
 
@@ -262,7 +264,7 @@ make dist GOOS=darwin GOARCH=arm64 VERSION=v1.0.0   # macOS Apple 芯片
 仓库提供 `.github/workflows/release.yml`。在 GitHub Actions 中手动运行 **Release**，填写版本号（例如 `v1.0.0`），工作流会：
 
 1. 分别通过 Makefile 构建 Windows x64、Linux x64、macOS x64、macOS arm64 四类产物；
-2. 各压缩包包含可执行文件、两个配置文件和 `README.md`；Windows 包另含 `stop.ps1` 与 `start-on-login.vbs`；
+2. 各压缩包包含可执行文件、两个配置文件和 `README.md`；Windows 包另含 `stop.ps1` 与 `start-on-login.vbs`，macOS 包另含 `CodeBuddy2API.app`、`stop.command` 与 `start-on-login.command`；
 3. 创建或更新对应 GitHub Release，并上传压缩包。
 
 macOS 产物必须在 macOS runner 上原生构建：SQLite 依赖 CGO，无法从 Linux/Windows 交叉编译。

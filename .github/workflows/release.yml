@@ -86,6 +86,12 @@ jobs:
             test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 6
             test -f dist/stop.ps1
             test -f dist/start-on-login.vbs
+          elif [[ "${{ matrix.goos }}" == "darwin" ]]; then
+            test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 6
+            test -f dist/stop.command
+            test -f dist/start-on-login.command
+            test -x dist/CodeBuddy2API.app/Contents/MacOS/CodeBuddy2API
+            plutil -lint dist/CodeBuddy2API.app/Contents/Info.plist
           else
             test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 4
           fi
