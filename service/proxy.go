@@ -1,20 +1,18 @@
 package service
 
 import (
+	"codebuddy-gateway/global"
+	"codebuddy-gateway/model"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 	"io"
 	"net/http"
 	"strings"
 	"time"
-
-	"codebuddy-gateway/global"
-	"codebuddy-gateway/model"
-
-	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
 )
 
 const statusClientClosedRequest = 499
@@ -40,11 +38,11 @@ type ChatRequestMeta struct {
 	Body           []byte
 	ClientIP       string
 	UserAgent      string
-	RequestPreview string
-	AffinityKey    string
-	Compact        bool
-	ToolRegistry   *responseToolRegistry
-	historyScope   responseHistoryScope
+
+	AffinityKey  string
+	Compact      bool
+	ToolRegistry *responseToolRegistry
+	historyScope responseHistoryScope
 	// ResponsesDowngradedTools records hosted/unknown Responses tools omitted
 	// before forwarding to the Chat Completions upstream.
 	ResponsesDowngradedTools []string
@@ -87,10 +85,8 @@ func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
 		UpstreamModel:  upstream,
 		ClientStream:   clientStream,
 		Body:           encoded,
-		RequestPreview: captureChatRequest(encoded),
 	}, nil
 }
-
 func (p *Proxy) HandleChat(c *gin.Context) {
 	raw, err := readRequestBody(c)
 	if err != nil {
@@ -110,7 +106,6 @@ func (p *Proxy) HandleChat(c *gin.Context) {
 	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
 }
-
 func (p *Proxy) HandleResponses(c *gin.Context) {
 	raw, err := readRequestBody(c)
 	if err != nil {
@@ -141,7 +136,6 @@ func (p *Proxy) HandleResponses(c *gin.Context) {
 	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
 }
-
 func (p *Proxy) HandleResponsesCompact(c *gin.Context) {
 	raw, err := readRequestBody(c)
 	if err != nil {
@@ -162,7 +156,6 @@ func (p *Proxy) HandleResponsesCompact(c *gin.Context) {
 	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
 }
-
 func (p *Proxy) HandleMessages(c *gin.Context) {
 	raw, err := readRequestBody(c)
 	if err != nil {
@@ -182,7 +175,6 @@ func (p *Proxy) HandleMessages(c *gin.Context) {
 	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/chat/completions")
 }
-
 func (p *Proxy) HandleCountTokens(c *gin.Context) {
 	raw, err := readRequestBody(c)
 	if err != nil {
@@ -209,7 +201,6 @@ func (p *Proxy) HandleCountTokens(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"input_tokens": estimateTokenCount(raw)})
 }
-
 func (p *Proxy) countTokensUpstream(ctx context.Context, headers http.Header, raw []byte) (int, error) {
 	meta, err := PrepareAnthropicBody(raw)
 	if err != nil {
@@ -228,7 +219,6 @@ func (p *Proxy) countTokensUpstream(ctx context.Context, headers http.Header, ra
 	}
 	meta.Body = encoded
 	meta.AffinityKey = RequestAffinityKey(headers, encoded)
-
 	exclude := map[uint]struct{}{}
 	refreshed := map[uint]bool{}
 	var lastErr error
@@ -246,7 +236,6 @@ func (p *Proxy) countTokensUpstream(ctx context.Context, headers http.Header, ra
 				continue
 			}
 		}
-
 		resp, cancel, err := p.doUpstreamAttempt(ctx, acc, "/v2/chat/completions", encoded)
 		if err != nil {
 			lastErr = err
@@ -287,7 +276,6 @@ func (p *Proxy) countTokensUpstream(ctx context.Context, headers http.Header, ra
 			}
 			continue
 		}
-
 		result, collectErr := collectSSE(resp.Body, meta.UpstreamModel)
 		resp.Body.Close()
 		cancel()
@@ -309,7 +297,6 @@ func (p *Proxy) countTokensUpstream(ctx context.Context, headers http.Header, ra
 	}
 	return 0, lastErr
 }
-
 func (p *Proxy) HandleCompletions(c *gin.Context) {
 	raw, err := readRequestBody(c)
 	if err != nil {
@@ -355,7 +342,6 @@ func (p *Proxy) HandleCompletions(c *gin.Context) {
 	meta.AffinityKey = RequestAffinityKey(c.Request.Header, meta.Body)
 	p.relay(c, meta, "/v2/completions")
 }
-
 func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	start := time.Now()
 	exclude := map[uint]struct{}{}
@@ -365,7 +351,6 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	var lastUpstreamRaw []byte
 	var lastUpstreamRequestID string
 	wafRetried := false
-
 	for i := 0; i < retries; i++ {
 		acc, err := p.rotator.NextForAffinity(exclude, meta.UpstreamModel, meta.AffinityKey)
 		if err != nil {
@@ -373,25 +358,22 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			break
 		}
 		exclude[acc.ID] = struct{}{}
-
 		if ShouldRefresh(acc.JWT, time.Hour) {
 			if refreshErr := p.refresher.RefreshAccount(c.Request.Context(), acc); refreshErr != nil {
 				global.CORE_LOG.Warn("preemptive refresh failed", zap.Uint("account_id", acc.ID), zap.Error(refreshErr))
 			}
 		}
-
 		resp, cancel, err := p.doUpstreamAttempt(c.Request.Context(), acc, path, meta.Body)
 		if err != nil {
 			lastErr = err.Error()
 			if downstreamRequestCanceled(c.Request.Context(), err) {
 				c.Status(statusClientClosedRequest)
-				p.recordUsage(acc, meta, start, statusClientClosedRequest, lastErr, nil)
+				p.observeUsage(acc, meta, start, statusClientClosedRequest, lastErr, nil)
 				return
 			}
 			p.rotator.MarkFailure(acc, lastErr)
 			continue
 		}
-
 		if resp.StatusCode == http.StatusUnauthorized {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -406,14 +388,13 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 				lastErr = err.Error()
 				if downstreamRequestCanceled(c.Request.Context(), err) {
 					c.Status(statusClientClosedRequest)
-					p.recordUsage(acc, meta, start, statusClientClosedRequest, lastErr, nil)
+					p.observeUsage(acc, meta, start, statusClientClosedRequest, lastErr, nil)
 					return
 				}
 				p.rotator.MarkFailure(acc, lastErr)
 				continue
 			}
 		}
-
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden {
 			raw, _ := io.ReadAll(resp.Body)
 			lastUpstreamStatus = resp.StatusCode
@@ -429,7 +410,6 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			}
 			continue
 		}
-
 		if resp.StatusCode != http.StatusOK {
 			raw, _ := io.ReadAll(resp.Body)
 			lastUpstreamStatus = resp.StatusCode
@@ -488,14 +468,12 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 				status = http.StatusBadRequest
 			}
 			gatewayErrorFromUpstream(c, meta.Protocol, status, lastErr, raw, upstreamRequestID(resp))
-			p.recordUsage(acc, meta, start, resp.StatusCode, lastErr, nil)
+			p.observeUsage(acc, meta, start, resp.StatusCode, lastErr, nil)
 			return
 		}
-
 		p.commitSuccess(c, acc, resp, cancel, meta, start)
 		return
 	}
-
 	if lastErr == "" {
 		lastErr = "no available codebuddy account"
 	}
@@ -505,7 +483,6 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	}
 	gatewayError(c, meta.Protocol, http.StatusServiceUnavailable, lastErr)
 }
-
 func upstreamRequestID(resp *http.Response) string {
 	if resp == nil {
 		return ""
@@ -515,7 +492,6 @@ func upstreamRequestID(resp *http.Response) string {
 	}
 	return resp.Header.Get("X-Request-ID")
 }
-
 func propagateUpstreamRequestID(c *gin.Context, resp *http.Response) string {
 	id := upstreamRequestID(resp)
 	if c != nil && id != "" {
@@ -523,7 +499,6 @@ func propagateUpstreamRequestID(c *gin.Context, resp *http.Response) string {
 	}
 	return id
 }
-
 func upstreamGatewayStatus(status int, raw []byte) int {
 	if status >= 500 {
 		return http.StatusBadGateway
@@ -533,7 +508,6 @@ func upstreamGatewayStatus(status int, raw []byte) int {
 	}
 	return status
 }
-
 func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Response, cancel context.CancelFunc, meta *ChatRequestMeta, start time.Time) {
 	defer cancel()
 	usage, writeErr := p.writeResponse(c, resp, meta, start, cancel)
@@ -557,9 +531,8 @@ func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Res
 	} else {
 		p.rotator.MarkSuccessFor(acc, meta.UpstreamModel)
 	}
-	p.recordUsage(acc, meta, start, status, errMsg, usage)
+	p.observeUsage(acc, meta, start, status, errMsg, usage)
 }
-
 func writeRelayFailure(c *gin.Context, proto Protocol, status int, err error) {
 	var upstreamErr *upstreamSSEError
 	if proto == ProtocolResponses && errors.As(err, &upstreamErr) {
@@ -568,14 +541,12 @@ func writeRelayFailure(c *gin.Context, proto Protocol, status int, err error) {
 	}
 	gatewayError(c, proto, status, err.Error())
 }
-
 func downstreamRequestCanceled(ctx context.Context, err error) bool {
 	if ctx == nil || ctx.Err() == nil {
 		return false
 	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
-
 func (p *Proxy) doUpstreamAttempt(parent context.Context, acc *model.Account, path string, body []byte) (*http.Response, context.CancelFunc, error) {
 	ctx, cancel := context.WithCancel(parent)
 	resp, err := p.doUpstream(ctx, acc, path, body)
@@ -585,14 +556,12 @@ func (p *Proxy) doUpstreamAttempt(parent context.Context, acc *model.Account, pa
 	}
 	return resp, cancel, nil
 }
-
 func (p *Proxy) doUpstream(ctx context.Context, acc *model.Account, path string, body []byte) (*http.Response, error) {
 	if path == "/v2/completions" {
 		return p.client.Completions(ctx, acc, body)
 	}
 	return p.client.ChatCompletions(ctx, acc, body)
 }
-
 func (p *Proxy) writeResponse(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
 	defer resp.Body.Close()
 	if meta.Protocol == ProtocolResponses || meta.Protocol == ProtocolAnthropic {
@@ -606,7 +575,6 @@ func (p *Proxy) writeResponse(c *gin.Context, resp *http.Response, meta *ChatReq
 	}
 	return p.writeJSON(c, resp, meta, start, cancel)
 }
-
 func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
 	reqID := propagateUpstreamRequestID(c, resp)
 	c.Header("Content-Type", "text/event-stream")
@@ -616,35 +584,32 @@ func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatReque
 	c.Status(http.StatusOK)
 	flusher, _ := c.Writer.(http.Flusher)
 	sink := newSSESink(c.Writer, flusher)
-
 	decoder := newSSEDecoder(resp.Body)
 	var usage *parsedUsage
 	var firstTokenMs int64
 	finishReason := ""
 	doneSeen := false
-	collector := NewCaptureCollector()
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
 	defer watchdog.stop()
 	stopHeartbeat := startSSEHeartbeat(sink)
 	defer stopHeartbeat()
-
 	for {
 		event, err := decoder.next()
 		if err == io.EOF {
 			if !normalSSETermination(false, finishReason) {
 				failure := wrapUpstreamStream(errSSEMissingEnd)
-				return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failChatStream(sink, failure)
+				return usageWithStreamMeta(usage, firstTokenMs, reqID), failChatStream(sink, failure)
 			}
 			if !doneSeen {
 				if _, doneErr := io.WriteString(sink, "data: [DONE]\n\n"); doneErr != nil {
-					return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), wrapDownstreamWrite(doneErr)
+					return usageWithStreamMeta(usage, firstTokenMs, reqID), wrapDownstreamWrite(doneErr)
 				}
 			}
 			break
 		}
 		if err != nil {
 			failure := streamReadError(err, watchdog, c.Request.Context())
-			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failChatStream(sink, failure)
+			return usageWithStreamMeta(usage, firstTokenMs, reqID), failChatStream(sink, failure)
 		}
 		watchdog.touch()
 		if event.Done {
@@ -664,19 +629,16 @@ func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatReque
 		if parsed == nil {
 			parsed = &parsedUsage{}
 		}
-		parsed.Collector = collector
-		collector.Write(chunkTextFromChunk(event.Chunk))
 		usage = mergeUsage(usage, parsed)
 		if _, err := io.WriteString(sink, out); err != nil {
 			if usage != nil {
 				usage.FirstTokenMs = firstTokenMs
 			}
-			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), wrapDownstreamWrite(err)
+			return usageWithStreamMeta(usage, firstTokenMs, reqID), wrapDownstreamWrite(err)
 		}
 	}
-	return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), nil
+	return usageWithStreamMeta(usage, firstTokenMs, reqID), nil
 }
-
 func (p *Proxy) writeJSON(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
 	requestID := propagateUpstreamRequestID(c, resp)
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
@@ -697,9 +659,6 @@ func (p *Proxy) writeJSON(c *gin.Context, resp *http.Response, meta *ChatRequest
 	if result.Usage.RequestID == "" {
 		result.Usage.RequestID = requestID
 	}
-	collector := NewCaptureCollector()
-	collector.Write(jsonResponseText(result))
-	result.Usage.Collector = collector
 	agg, err := encodeChatJSON(result)
 	if err != nil {
 		return result.Usage, err
@@ -711,7 +670,6 @@ func (p *Proxy) writeJSON(c *gin.Context, resp *http.Response, meta *ChatRequest
 	}
 	return result.Usage, nil
 }
-
 func failChatStream(sink io.Writer, err error) error {
 	payload := map[string]any{"error": map[string]any{
 		"message": err.Error(),
@@ -729,23 +687,19 @@ func failChatStream(sink io.Writer, err error) error {
 	}
 	return err
 }
-
-func usageWithStreamMeta(usage *parsedUsage, collector *CaptureCollector, firstTokenMs int64, reqID string) *parsedUsage {
+func usageWithStreamMeta(usage *parsedUsage, firstTokenMs int64, reqID string) *parsedUsage {
 	if usage == nil {
 		usage = &parsedUsage{}
 	}
-	usage.Collector = collector
 	usage.FirstTokenMs = firstTokenMs
 	if reqID != "" && usage.RequestID == "" {
 		usage.RequestID = reqID
 	}
 	return usage
 }
-
 func normalSSETermination(done bool, finishReason string) bool {
 	return done || finishReason != ""
 }
-
 func rewriteSSEEvent(event *sseEvent, requestedModel string) (string, *parsedUsage) {
 	if event == nil {
 		return "", nil
@@ -770,7 +724,6 @@ func rewriteSSEEvent(event *sseEvent, requestedModel string) (string, *parsedUsa
 	}
 	return "data: " + string(encoded) + "\n\n", usage
 }
-
 func rewriteSSELine(line, requestedModel string) (string, *parsedUsage) {
 	done, chunk := parseChatSSELine(line)
 	event := &sseEvent{Done: done, Chunk: chunk}
@@ -783,7 +736,6 @@ func rewriteSSELine(line, requestedModel string) (string, *parsedUsage) {
 	}
 	return strings.TrimSuffix(out, "\n"), usage
 }
-
 func aggregateSSE(r io.Reader, requestedModel string) ([]byte, *parsedUsage, error) {
 	result, err := collectSSE(r, requestedModel)
 	if err != nil {
@@ -795,7 +747,6 @@ func aggregateSSE(r io.Reader, requestedModel string) ([]byte, *parsedUsage, err
 	}
 	return encoded, result.Usage, nil
 }
-
 func stripNonOpenAI(chunk map[string]any) {
 	if choices, ok := chunk["choices"].([]any); ok {
 		for _, item := range choices {
@@ -835,7 +786,6 @@ func readRequestBody(c *gin.Context) ([]byte, error) {
 	}
 	return raw, nil
 }
-
 func attachClientMeta(c *gin.Context, meta *ChatRequestMeta) {
 	if meta == nil {
 		return
@@ -843,7 +793,6 @@ func attachClientMeta(c *gin.Context, meta *ChatRequestMeta) {
 	meta.ClientIP = c.ClientIP()
 	meta.UserAgent = clipText(c.Request.UserAgent(), 240)
 }
-
 func logResponsesPrepareError(c *gin.Context, raw []byte, err error) {
 	if global.CORE_LOG == nil {
 		return
@@ -854,7 +803,6 @@ func logResponsesPrepareError(c *gin.Context, raw []byte, err error) {
 		zap.Error(err),
 	)
 }
-
 func logResponsesDowngrade(meta *ChatRequestMeta, c *gin.Context) {
 	if meta == nil || global.CORE_LOG == nil {
 		return
@@ -869,7 +817,6 @@ func logResponsesDowngrade(meta *ChatRequestMeta, c *gin.Context) {
 		zap.String("request_id", requestIDFromContext(c)),
 	)
 }
-
 func requestModelFromRaw(raw []byte) string {
 	var body map[string]any
 	if json.Unmarshal(raw, &body) != nil {
@@ -877,7 +824,6 @@ func requestModelFromRaw(raw []byte) string {
 	}
 	return asString(body["model"])
 }
-
 func requestIDFromContext(c *gin.Context) string {
 	if c == nil || c.Request == nil {
 		return ""
@@ -887,8 +833,7 @@ func requestIDFromContext(c *gin.Context) string {
 	}
 	return c.GetHeader("X-Request-ID")
 }
-
-func (p *Proxy) recordUsage(acc *model.Account, meta *ChatRequestMeta, start time.Time, status int, errMsg string, usage *parsedUsage) {
+func (p *Proxy) observeUsage(acc *model.Account, meta *ChatRequestMeta, start time.Time, status int, errMsg string, usage *parsedUsage) {
 	if usage == nil {
 		usage = &parsedUsage{}
 	}
@@ -896,63 +841,19 @@ func (p *Proxy) recordUsage(acc *model.Account, meta *ChatRequestMeta, start tim
 		rememberGoodModel(meta.UpstreamModel)
 	}
 	deriveMetrics(usage, time.Since(start).Milliseconds())
-	log := &model.UsageLog{
-		AccountID:                acc.ID,
-		AccountName:              accountLabel(acc),
-		Protocol:                 string(meta.Protocol),
-		Model:                    meta.RequestedModel,
-		UpstreamModel:            meta.UpstreamModel,
-		Stream:                   meta.ClientStream,
-		PromptTokens:             usage.PromptTokens,
-		CompletionTokens:         usage.CompletionTokens,
-		TotalTokens:              usage.TotalTokens,
-		ThinkingTokens:           usage.ThinkingTokens,
-		Credit:                   usage.Credit,
-		EstimatedCredit:          estimateCredit(usage.PromptTokens, usage.CompletionTokens),
-		CacheHitTokens:           usage.CacheHitTokens,
-		CacheMissTokens:          usage.CacheMissTokens,
-		CacheHitRate:             usage.CacheHitRate,
-		CacheReadInputTokens:     usage.CacheReadInputTokens,
-		CacheCreationInputTokens: usage.CacheCreationInputTokens,
-		CacheWriteTokens:         usage.CacheWriteTokens,
-		CachedTokens:             usage.CachedTokens,
-		FirstTokenMs:             usage.FirstTokenMs,
-		LatencyMs:                usage.LatencyMs,
-		TokensPerSecond:          usage.TokensPerSecond,
-		OutputTokensPerSecond:    usage.OutputTokensPerSecond,
-		StatusCode:               status,
-		Error:                    errMsg,
-		RequestID:                usage.RequestID,
-		ClientIP:                 meta.ClientIP,
-		UserAgent:                meta.UserAgent,
-		RequestTokens:            len(meta.Body),
-		RequestPreview:           meta.RequestPreview,
-		ResponseTokens:           usage.ResponseBytes,
-		ResponsePreview:          usage.ResponsePreview,
-		RawUsage:                 clipRawUsage(usage.Raw),
-	}
 	if usage.Credit > 0 {
-		if deduct, err := model.ApplyCreditDeduction(acc.ID, usage.Credit); err == nil && deduct != nil {
-			log.CreditMonthly = deduct.Monthly
-			log.CreditOnetime = deduct.Onetime
-			log.CreditSource = deduct.Source
+		deduct, err := model.ApplyCreditDeduction(acc.ID, usage.Credit)
+		if err == nil && deduct != nil {
 			if deduct.Remain <= 0 && acc.CreditSyncedAt != nil {
 				until := time.Now().Add(time.Duration(global.CORE_CONFIG.Watchdog.Cooldown()) * time.Second)
 				_ = model.MarkAccountFailure(acc.ID, "credit exhausted", acc.FailCount+1, model.AccountStatusCooldown, &until)
 			}
 		}
 	}
-	// 成本账本：记录该账号跑该模型的实测单价，供下次选号优先挑免费的。
-	//
-	// 只记上游真回了 usage 的请求：tokens 为 0 时可能是响应缺 usage 字段，
-	// 那种情况记成「0 单价」会把未知误判成免费，让这个号垄断该模型流量。
-	// 这一条同时覆盖免费观测（credit=0 且 tokens>0 才是真的免费）。
 	if usage.TotalTokens > 0 {
 		NoteModelCost(acc.ID, meta.UpstreamModel, usage.Credit, usage.TotalTokens)
 	}
-	_ = model.CreateUsageLog(log)
 }
-
 func openaiError(c *gin.Context, status int, msg string) {
 	openaiErrorWithDetails(c, status, msg, "codebuddy_gateway_error", "", "")
 }

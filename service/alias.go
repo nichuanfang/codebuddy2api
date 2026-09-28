@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
-	"time"
 
 	"codebuddy-gateway/global"
 )
@@ -14,7 +13,6 @@ const defaultFallbackModel = "deepseek-v4.1-flash"
 var goodModelCache struct {
 	mu   sync.Mutex
 	name string
-	dbAt time.Time
 }
 
 func ResolveModelAlias(name string) string {
@@ -60,19 +58,9 @@ func fallbackUpstreamModel() string {
 	}
 	goodModelCache.mu.Lock()
 	name := goodModelCache.name
-	needDB := name == "" && global.CORE_DB != nil && time.Since(goodModelCache.dbAt) > 15*time.Second
-	if needDB {
-		goodModelCache.dbAt = time.Now()
-	}
 	goodModelCache.mu.Unlock()
 	if name != "" && !isOpenAIHostedModel(name) {
 		return name
-	}
-	if needDB {
-		if dbName := latestSuccessfulUpstreamModel(); dbName != "" && !isOpenAIHostedModel(dbName) {
-			rememberGoodModel(dbName)
-			return dbName
-		}
 	}
 	return defaultFallbackModel
 }
@@ -85,23 +73,6 @@ func rememberGoodModel(name string) {
 	goodModelCache.mu.Lock()
 	goodModelCache.name = name
 	goodModelCache.mu.Unlock()
-}
-
-func latestSuccessfulUpstreamModel() string {
-	db := global.CORE_DB
-	if db == nil {
-		return ""
-	}
-	var name string
-	if err := db.Table("usage_logs").
-		Select("upstream_model").
-		Where("status_code = ? AND upstream_model <> ''", 200).
-		Order("id desc").
-		Limit(1).
-		Scan(&name).Error; err != nil {
-		return ""
-	}
-	return strings.TrimSpace(name)
 }
 
 func rewriteChatModel(body []byte, model string) []byte {
@@ -140,6 +111,5 @@ func maybeRewriteUnavailableModel(meta *ChatRequestMeta) bool {
 func resetGoodModelCache() {
 	goodModelCache.mu.Lock()
 	goodModelCache.name = ""
-	goodModelCache.dbAt = time.Time{}
 	goodModelCache.mu.Unlock()
 }

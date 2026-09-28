@@ -27,14 +27,12 @@ var (
 	// （实测 "…led by OpenAI and maintained by contributors." 整句会被吞光）。
 	// 因此尾段在遇到 and/or/but/以及逗号句读时立刻收手。
 	codexOriginPattern = regexp.MustCompile(`(?i)\bCodex(?: CLI)?\s*[,，]?\s*(?:is|was|being)?\s*(?:an?\s+)?open[\s-]?sour(?:ce|ced)\s+(?:project|tool|software|initiative|effort|assistant)?\s*(?:led|developed|maintained|built|created|made|backed|sponsored|supported|by|from|of)?\s*(?:by|from|of|at)?\s*OpenAI(?:\s+by\s+[A-Z][\w.]*)*\s*[.,;，；]?`)
-
 	// openAIAttributionPattern 兜底：零散的「由 OpenAI 提供/维护」短语。
 	// 只吃「动词 + by OpenAI」这个短语本身，不吃后面的从句：
 	// 旧写法把整句吞掉，遇到不含 "Codex" 的句子会把主语一起删掉，留下残句。
 	openAIAttributionPattern = regexp.MustCompile(`(?i)\b(?:led|developed|maintained|built|created|made|backed|sponsored|supported|provided|offered|by|from)\s+by\s+OpenAI\b`)
 	// openAIPlainAttributionPattern 处理 "by OpenAI" / "from OpenAI" 裸短语。
 	openAIPlainAttributionPattern = regexp.MustCompile(`(?i)\b(?:by|from|of)\s+OpenAI\b`)
-
 	// branding 词表：出现于 harness 模板里的竞品/归属品牌词，统一做零宽脱敏。
 	// 用词边界避免误伤（如 "Anthropic" 不要命中 "Anthropics" 之外的词）。
 	brandingTerms = []string{
@@ -218,7 +216,6 @@ func sanitizeLevelFromName(name string) sanitizeLevel {
 		return sanitizeHarness
 	}
 }
-
 func (l sanitizeLevel) String() string {
 	switch l {
 	case sanitizeOff:
@@ -597,7 +594,6 @@ func hasSensitiveTerm(s string) bool {
 func desensitizeAllTerms(s string) string {
 	return desensitizeTerms(desensitizeTerms(s, brandingMatcher), complianceMatcher)
 }
-
 func sanitizeContentValue(v any) any {
 	return sanitizeContentLevel(v, sanitizeHarness)
 }
@@ -668,7 +664,6 @@ func sanitizeText(s string, level sanitizeLevel) string {
 // ---------------------------------------------------------------------------
 // 结构性手段：harness 块整段重写
 // ---------------------------------------------------------------------------
-
 // harnessBlock 描述一对客户端注入的标记，以及该用哪段中性文本顶替它。
 //
 // 这是与「零宽脱敏」互补的第二条路线，存在的理由很直接：零宽只在后端做
@@ -837,15 +832,12 @@ func tidySpacing(s string) string {
 	}
 	return strings.Join(lines, "\n")
 }
-
 func isUnapprovedChannel(raw []byte) bool {
 	return classifyUpstreamRejection(raw) == rejectionUnapprovedChannel
 }
-
 func isUpstreamModelUnavailable(raw []byte) bool {
 	return classifyUpstreamRejection(raw) == rejectionModelUnauthorized
 }
-
 func isUpstreamRequestError(raw []byte) bool {
 	return classifyUpstreamRejection(raw) != rejectionNone
 }
@@ -918,7 +910,6 @@ func classifyUpstreamRejection(raw []byte) rejectionKind {
 	}
 	return rejectionNone
 }
-
 func isModelQuotaExhausted(status int, raw []byte) bool {
 	if status == 429 {
 		return true
@@ -948,7 +939,6 @@ func isModelQuotaExhausted(status int, raw []byte) bool {
 // ---------------------------------------------------------------------------
 // 11128 降级重试：escalating re-sanitize
 // ---------------------------------------------------------------------------
-
 // resanitizeUpstreamChat 返回一份「更激进」的请求体，用于 11128 被拒后的降级重试。
 //
 // 与首轮的区别只有力度：首轮按配置档位清洗（通常只碰客户端模板面），这里直接上
@@ -1038,7 +1028,5 @@ func retryWAFRejectedBody(meta *ChatRequestMeta) bool {
 		return false
 	}
 	meta.Body = encoded
-	// 请求预览同步更新，便于后台看到真正发出去的 body。
-	meta.RequestPreview = captureChatRequest(encoded)
 	return true
 }

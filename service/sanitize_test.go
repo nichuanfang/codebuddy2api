@@ -357,9 +357,6 @@ func TestRetryWAFRejectedBody(t *testing.T) {
 	if parsed["model"] != "glm-5.2" {
 		t.Fatalf("model field must be preserved: %v", parsed["model"])
 	}
-	if meta.RequestPreview == "" {
-		t.Fatal("request preview should be refreshed")
-	}
 }
 
 // TestLooksLikeHarnessContext 标记识别要准，不能把普通提问误判成 harness 上下文

@@ -2354,9 +2354,8 @@ def main():
         info("")
         info("导入后：")
         info("  1) 若是 MySQL/PG 库，重启你的 codebuddy2api 服务")
-        info("  2) 跑一次额度同步让新号余额入库：")
-        info("     curl -H 'Authorization: Bearer <admin-key>' -X POST http://127.0.0.1:8088/admin/sync-credit")
-        info("  3) 确认账号列表：curl -H 'Authorization: Bearer <admin-key>' http://127.0.0.1:8088/admin/accounts")
+        info("  2) 额度由服务内看门狗自动同步。")
+        info("     使用 account list 查看账号。")
     finally:
         try:
             con.close()

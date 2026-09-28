@@ -2,21 +2,18 @@ package service
 
 import (
 	"bytes"
+	"codebuddy-gateway/global"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 	"io"
 	"net/http"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"codebuddy-gateway/global"
-
-	"go.uber.org/zap"
-
-	"github.com/gin-gonic/gin"
 )
 
 type streamAdapter interface {
@@ -31,7 +28,6 @@ type streamAdapter interface {
 	finish() error
 	fail(error) error
 }
-
 type toolStreamState struct {
 	index       int
 	outputIndex int
@@ -48,7 +44,6 @@ type toolStreamState struct {
 func newStreamAdapter(proto Protocol, w io.Writer, flusher http.Flusher, model string) streamAdapter {
 	return newStreamAdapterWithRegistry(proto, w, flusher, model, nil)
 }
-
 func newStreamAdapterWithRegistry(proto Protocol, w io.Writer, flusher http.Flusher, model string, registry *responseToolRegistry) streamAdapter {
 	if proto.IsAnthropic() {
 		return &anthropicAdapter{
@@ -71,7 +66,6 @@ func newStreamAdapterWithRegistry(proto Protocol, w io.Writer, flusher http.Flus
 		unknownTools: make(map[string]struct{}),
 	}
 }
-
 func writeSSEEvent(w io.Writer, flusher http.Flusher, event string, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -94,7 +88,6 @@ func writeSSEEvent(w io.Writer, flusher http.Flusher, event string, payload any)
 	}
 	return nil
 }
-
 func applyChunkToAdapter(em streamAdapter, chunk map[string]any) {
 	if em == nil || chunk == nil {
 		return
@@ -145,7 +138,6 @@ type responseSegment struct {
 	id    string
 	text  string
 }
-
 type responsesAdapter struct {
 	w                 io.Writer
 	flusher           http.Flusher
@@ -183,34 +175,28 @@ func (a *responsesAdapter) emit(typ string, payload map[string]any) {
 	payload["sequence_number"] = a.seq
 	a.err = writeSSEEvent(a.w, a.flusher, typ, payload)
 }
-
 func (a *responsesAdapter) start() {
 	a.emit("response.created", map[string]any{"response": a.skeleton("in_progress")})
 	a.emit("response.in_progress", map[string]any{"response": a.skeleton("in_progress")})
 }
-
 func (a *responsesAdapter) setID(id string) {
 	if a.id == "" && id != "" {
 		a.id = ensureID(id, "resp_")
 	}
 }
-
 func (a *responsesAdapter) setModel(model string) {
 	if model != "" {
 		a.model = model
 	}
 }
-
 func (a *responsesAdapter) setUsage(u *parsedUsage) {
 	a.usage = u
 }
-
 func (a *responsesAdapter) onFinishReason(s string) {
 	if s != "" {
 		a.finishReason = s
 	}
 }
-
 func (a *responsesAdapter) onReasoning(s string) {
 	if s == "" {
 		return
@@ -245,7 +231,6 @@ func (a *responsesAdapter) onReasoning(s string) {
 		"delta":         s,
 	})
 }
-
 func (a *responsesAdapter) closeReasoning() {
 	if !a.reasoningOpen {
 		return
@@ -276,7 +261,6 @@ func (a *responsesAdapter) closeReasoning() {
 	a.reasoningSegments = append(a.reasoningSegments, responseSegment{index: a.reasoningIdx, id: a.reasoningItemID, text: text})
 	a.reasoningOpen = false
 }
-
 func (a *responsesAdapter) onText(s string) {
 	if s == "" {
 		return
@@ -291,7 +275,6 @@ func (a *responsesAdapter) onText(s string) {
 		"delta":         s,
 	})
 }
-
 func (a *responsesAdapter) closeText() {
 	if !a.textOpen {
 		return
@@ -324,7 +307,6 @@ func (a *responsesAdapter) closeText() {
 	a.textSegments = append(a.textSegments, responseSegment{index: a.textIdx, id: a.textItemID, text: text})
 	a.textOpen = false
 }
-
 func (a *responsesAdapter) onToolCall(tc AggregatedToolCall) {
 	a.closeReasoning()
 	a.closeText()
@@ -380,7 +362,6 @@ func (a *responsesAdapter) onToolCall(tc AggregatedToolCall) {
 		})
 	}
 }
-
 func (a *responsesAdapter) openFunctionCall(st *toolStreamState) {
 	if st.opened {
 		return
@@ -407,7 +388,6 @@ func (a *responsesAdapter) openFunctionCall(st *toolStreamState) {
 	})
 	st.opened = true
 }
-
 func (a *responsesAdapter) emitCustomToolCall(st *toolStreamState) {
 	if st.callID == "" {
 		st.callID = newID("call_")
@@ -468,7 +448,6 @@ func (a *responsesAdapter) emitCustomToolCall(st *toolStreamState) {
 	a.toolSegments = append(a.toolSegments, cloneToolState(st))
 	st.closed = true
 }
-
 func (a *responsesAdapter) closeTools() {
 	for _, idx := range a.toolOrder {
 		st := a.tools[idx]
@@ -523,7 +502,6 @@ func (a *responsesAdapter) closeTools() {
 		a.toolSegments = append(a.toolSegments, cloneToolState(st))
 	}
 }
-
 func (a *responsesAdapter) finish() error {
 	a.closeReasoning()
 	if a.textOpen {
@@ -542,7 +520,6 @@ func (a *responsesAdapter) finish() error {
 	a.emit(eventType, map[string]any{"response": a.full(status)})
 	return a.err
 }
-
 func (a *responsesAdapter) ensureTextItem() {
 	if a.textOpen {
 		return
@@ -569,7 +546,6 @@ func (a *responsesAdapter) ensureTextItem() {
 	})
 	a.textOpen = true
 }
-
 func (a *responsesAdapter) skeleton(status string) map[string]any {
 	return map[string]any{
 		"id":                 a.id,
@@ -582,7 +558,6 @@ func (a *responsesAdapter) skeleton(status string) map[string]any {
 		"incomplete_details": nil,
 	}
 }
-
 func cloneToolState(st *toolStreamState) *toolStreamState {
 	if st == nil {
 		return nil
@@ -590,7 +565,6 @@ func cloneToolState(st *toolStreamState) *toolStreamState {
 	cp := *st
 	return &cp
 }
-
 func (a *responsesAdapter) full(status string) map[string]any {
 	type outputEntry struct {
 		index int
@@ -668,7 +642,6 @@ func (a *responsesAdapter) full(status string) map[string]any {
 		"incomplete_details": incomplete,
 	}
 }
-
 func (a *responsesAdapter) fail(err error) error {
 	a.closeReasoning()
 	a.closeText()
@@ -713,7 +686,6 @@ func (a *anthropicAdapter) emit(typ string, payload map[string]any) {
 	}
 	a.err = writeSSEEvent(a.w, a.flusher, typ, payload)
 }
-
 func (a *anthropicAdapter) start() {
 	input := 0
 	if a.usage != nil {
@@ -737,29 +709,24 @@ func (a *anthropicAdapter) start() {
 		},
 	})
 }
-
 func (a *anthropicAdapter) setID(id string) {
 	if a.id == "" && id != "" {
 		a.id = ensureID(id, "msg_")
 	}
 }
-
 func (a *anthropicAdapter) setModel(model string) {
 	if model != "" {
 		a.model = model
 	}
 }
-
 func (a *anthropicAdapter) setUsage(u *parsedUsage) {
 	a.usage = u
 }
-
 func (a *anthropicAdapter) onFinishReason(s string) {
 	if s != "" {
 		a.finishReason = s
 	}
 }
-
 func (a *anthropicAdapter) onReasoning(s string) {
 	if s == "" {
 		return
@@ -782,7 +749,6 @@ func (a *anthropicAdapter) onReasoning(s string) {
 		"delta": map[string]any{"type": "thinking_delta", "thinking": s},
 	})
 }
-
 func (a *anthropicAdapter) closeThinking() {
 	if !a.thinkingOpen {
 		return
@@ -790,7 +756,6 @@ func (a *anthropicAdapter) closeThinking() {
 	a.emit("content_block_stop", map[string]any{"index": a.thinkingIdx})
 	a.thinkingOpen = false
 }
-
 func (a *anthropicAdapter) onText(s string) {
 	if s == "" {
 		return
@@ -814,7 +779,6 @@ func (a *anthropicAdapter) onText(s string) {
 		"delta": map[string]any{"type": "text_delta", "text": s},
 	})
 }
-
 func (a *anthropicAdapter) closeText() {
 	if !a.textOpen {
 		return
@@ -822,7 +786,6 @@ func (a *anthropicAdapter) closeText() {
 	a.emit("content_block_stop", map[string]any{"index": a.textIdx})
 	a.textOpen = false
 }
-
 func (a *anthropicAdapter) onToolCall(tc AggregatedToolCall) {
 	a.closeThinking()
 	a.closeText()
@@ -862,7 +825,6 @@ func (a *anthropicAdapter) onToolCall(tc AggregatedToolCall) {
 		})
 	}
 }
-
 func (a *anthropicAdapter) closeTools() {
 	for _, idx := range a.toolOrder {
 		st := a.tools[idx]
@@ -873,7 +835,6 @@ func (a *anthropicAdapter) closeTools() {
 		st.opened = false
 	}
 }
-
 func (a *anthropicAdapter) finish() error {
 	a.closeThinking()
 	if a.textOpen {
@@ -905,7 +866,6 @@ func (a *anthropicAdapter) finish() error {
 	a.emit("message_stop", map[string]any{})
 	return a.err
 }
-
 func (a *anthropicAdapter) fail(err error) error {
 	a.closeThinking()
 	a.closeText()
@@ -914,7 +874,6 @@ func (a *anthropicAdapter) fail(err error) error {
 	a.emit("message_stop", map[string]any{})
 	return a.err
 }
-
 func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
 	requestID := propagateUpstreamRequestID(c, resp)
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
@@ -932,9 +891,6 @@ func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatR
 	if result.Usage != nil && result.Usage.RequestID == "" {
 		result.Usage.RequestID = requestID
 	}
-	collector := NewCaptureCollector()
-	collector.Write(jsonResponseText(result))
-	result.Usage.Collector = collector
 	var encoded []byte
 	switch meta.Protocol {
 	case ProtocolAnthropic:
@@ -968,7 +924,6 @@ func (p *Proxy) writeCompatJSON(c *gin.Context, resp *http.Response, meta *ChatR
 	}
 	return result.Usage, nil
 }
-
 func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *ChatRequestMeta, start time.Time, cancel context.CancelFunc) (*parsedUsage, error) {
 	reqID := propagateUpstreamRequestID(c, resp)
 	c.Header("Content-Type", "text/event-stream")
@@ -981,45 +936,41 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 	c.Status(http.StatusOK)
 	flusher, _ := c.Writer.(http.Flusher)
 	sink := newSSESink(c.Writer, flusher)
-
 	// sseSink flushes exactly once per write; passing nil avoids a second flush
 	// from writeSSEEvent.
 	em := newStreamAdapterWithRegistry(meta.Protocol, sink, nil, meta.RequestedModel, meta.ToolRegistry)
 	em.start()
-
 	decoder := newSSEDecoder(resp.Body)
 	var usage *parsedUsage
 	var firstTokenMs int64
 	var finishReason string
-	collector := NewCaptureCollector()
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
 	defer watchdog.stop()
 	stopHeartbeat := startSSEHeartbeat(sink)
 	defer stopHeartbeat()
-
 	for {
 		event, err := decoder.next()
 		if err == io.EOF {
 			if !normalSSETermination(false, finishReason) {
 				failure := wrapUpstreamStream(errSSEMissingEnd)
-				em.setUsage(usageWithStreamMeta(usage, collector, firstTokenMs, reqID))
+				em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
 				_ = em.fail(failure)
-				return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
+				return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
 			}
 			break
 		}
 		if err != nil {
 			failure := streamReadError(err, watchdog, c.Request.Context())
-			em.setUsage(usageWithStreamMeta(usage, collector, firstTokenMs, reqID))
+			em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
 			_ = em.fail(failure)
-			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
+			return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
 		}
 		watchdog.touch()
 		if upstreamErr := event.upstreamError(); upstreamErr != nil {
 			failure := wrapUpstreamStream(upstreamErr)
-			em.setUsage(usageWithStreamMeta(usage, collector, firstTokenMs, reqID))
+			em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
 			_ = em.fail(failure)
-			return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
+			return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
 		}
 		if event.Done {
 			break
@@ -1037,21 +988,18 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 		if parsed == nil {
 			parsed = &parsedUsage{}
 		}
-		parsed.Collector = collector
-		collector.Write(chunkTextFromChunk(event.Chunk))
 		usage = mergeUsage(usage, parsed)
 		applyChunkToAdapter(em, event.Chunk)
 	}
-
 	if extra, nudgeErr := p.nudgePreambleIfNeeded(c, meta, em); nudgeErr != nil {
 		failure := wrapUpstreamStream(nudgeErr)
-		em.setUsage(usageWithStreamMeta(usage, collector, firstTokenMs, reqID))
+		em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
 		_ = em.fail(failure)
-		return usageWithStreamMeta(usage, collector, firstTokenMs, reqID), failure
+		return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
 	} else if extra != nil {
 		usage = mergeUsage(usage, extra)
 	}
-	usage = usageWithStreamMeta(usage, collector, firstTokenMs, reqID)
+	usage = usageWithStreamMeta(usage, firstTokenMs, reqID)
 	em.setUsage(usage)
 	if finishReason != "" {
 		em.onFinishReason(finishReason)
@@ -1086,7 +1034,6 @@ func newSSESink(w io.Writer, flusher http.Flusher) *sseSink {
 	s.lastWrite.Store(time.Now().UnixNano())
 	return s
 }
-
 func (s *sseSink) Write(p []byte) (int, error) {
 	if s == nil || s.w == nil {
 		return 0, io.ErrClosedPipe
@@ -1107,7 +1054,6 @@ func (s *sseSink) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
-
 func (s *sseSink) Flush() {
 	if s == nil {
 		return
@@ -1118,7 +1064,6 @@ func (s *sseSink) Flush() {
 		s.flusher.Flush()
 	}
 }
-
 func (s *sseSink) LastWrite() time.Time {
 	if s == nil {
 		return time.Time{}
@@ -1157,7 +1102,6 @@ type sseActivitySource interface {
 func startSSEHeartbeat(w io.Writer) func() {
 	return startSSEHeartbeatInterval(w, sseHeartbeatInterval)
 }
-
 func startSSEHeartbeatInterval(w io.Writer, interval time.Duration) func() {
 	if interval <= 0 {
 		interval = sseHeartbeatInterval

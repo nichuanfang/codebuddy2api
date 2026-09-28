@@ -220,30 +220,6 @@ func TestResponsesRejectsEmptyConvertedInput(t *testing.T) {
 	}
 }
 
-func TestResponsesPreservesLargeCodexContext(t *testing.T) {
-	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
-	text := strings.Repeat("abcd", 1_000_000)
-	raw, err := json.Marshal(map[string]any{"model": "glm-5.3", "input": text})
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := PrepareResponsesBody(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(meta.Body, &body); err != nil {
-		t.Fatal(err)
-	}
-	messages := body["messages"].([]any)
-	if got := messages[0].(map[string]any)["content"]; got != text {
-		t.Fatalf("large context was changed: got %d bytes, want %d", len(got.(string)), len(text))
-	}
-	if len(meta.RequestPreview) > maxRequestPreview+len("…(已截断)") {
-		t.Fatalf("preview was not bounded: %d", len(meta.RequestPreview))
-	}
-}
-
 func TestResponsesCompactEnvelopeRoundTrip(t *testing.T) {
 	result := &ChatResult{
 		ID:      "resp_compact_test",

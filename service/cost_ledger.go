@@ -190,7 +190,7 @@ func NoteModelCost(accountID uint, modelName string, credit float64, tokens int)
 	defaultCostLedger.note(accountID, modelName, credit, tokens)
 }
 
-// CostLedgerStats 返回账本统计，供管理接口展示。
+// CostLedgerStats 返回账本统计。
 func CostLedgerStats() (total, free, paid int) {
 	return defaultCostLedger.stats()
 }

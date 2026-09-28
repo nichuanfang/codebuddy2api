@@ -22,10 +22,6 @@ type parsedUsage struct {
 	TokensPerSecond          float64
 	OutputTokensPerSecond    float64
 	RequestID                string
-	Raw                      map[string]any
-	ResponsePreview          string
-	ResponseBytes            int
-	Collector                *CaptureCollector
 }
 
 func extractUsage(chunk map[string]any) *parsedUsage {
@@ -43,7 +39,6 @@ func extractUsage(chunk map[string]any) *parsedUsage {
 		}
 		return u
 	}
-	u.Raw = raw
 	u.PromptTokens = asInt(raw["prompt_tokens"])
 	u.CompletionTokens = asInt(raw["completion_tokens"])
 	u.TotalTokens = asInt(raw["total_tokens"])
@@ -88,12 +83,6 @@ func mergeUsage(dst, src *parsedUsage) *parsedUsage {
 	if src.RequestID != "" {
 		dst.RequestID = src.RequestID
 	}
-	if src.Collector != nil {
-		dst.Collector = src.Collector
-	}
-	if src.Raw != nil {
-		dst.Raw = src.Raw
-	}
 	if src.PromptTokens > 0 || src.CompletionTokens > 0 || src.Credit > 0 || src.ThinkingTokens > 0 {
 		dst.PromptTokens = src.PromptTokens
 		dst.CompletionTokens = src.CompletionTokens
@@ -128,10 +117,6 @@ func deriveMetrics(u *parsedUsage, latencyMs int64) {
 	if gen > 0 && u.CompletionTokens > 0 {
 		u.OutputTokensPerSecond = float64(u.CompletionTokens) / (float64(gen) / 1000.0)
 	}
-	if u.Collector != nil {
-		u.ResponsePreview = u.Collector.String()
-		u.ResponseBytes = u.Collector.Written()
-	}
 }
 
 func lineHasGeneratedToken(line string) bool {
@@ -158,7 +143,7 @@ func asInt(v any) int {
 func asFloat(v any) float64 {
 	switch n := v.(type) {
 	case float64:
-		return n
+		return float64(n)
 	case int:
 		return float64(n)
 	case int64:

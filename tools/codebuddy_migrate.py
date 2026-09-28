@@ -19,8 +19,8 @@
   python3 codebuddy_migrate.py verify --auth-dir ./auths \
       --status-url http://127.0.0.1:7863/status --api-key sk-xxx
 
-为什么必须直连数据库：koazy0 的 HTTP 管理接口在返回账号时对 jwt / refresh_token
-调用 MaskToken() 掩码（api/handler/admin/account.go 的 publicAccount），
+为什么必须直连数据库：旧版 HTTP 管理接口在返回账号时对 jwt / refresh_token
+调用 MaskToken() 掩码，
 从 API 拿不到可用凭据，只能读库。
 """
 
