@@ -8,6 +8,8 @@ import (
 
 	"codebuddy-gateway/global"
 	"codebuddy-gateway/model"
+
+	"go.uber.org/zap"
 )
 
 type sessionBinding struct {
@@ -75,6 +77,11 @@ func (r *Rotator) NextForAffinity(exclude map[uint]struct{}, modelName, affinity
 		candidates = append(candidates, acc)
 	}
 	if len(candidates) == 0 {
+		global.CORE_LOG.Warn("no eligible account for model",
+			zap.String("model", modelName),
+			zap.Int("enabled_accounts", len(list)),
+			zap.Int("excluded", len(exclude)),
+		)
 		return nil, fmt.Errorf("no available codebuddy account")
 	}
 
@@ -125,6 +132,12 @@ func (r *Rotator) NextForAffinity(exclude map[uint]struct{}, modelName, affinity
 			lastUsed:  now,
 		}
 	}
+	global.CORE_LOG.Debug("account selected",
+		zap.String("model", modelName),
+		zap.Uint("account_id", picked.ID),
+		zap.String("mode", mode),
+		zap.Int("candidates", len(candidates)),
+	)
 	return cloneAccount(picked), nil
 }
 
@@ -229,6 +242,11 @@ func (r *Rotator) MarkFailure(acc *model.Account, errMsg string) {
 		until := time.Now().Add(time.Duration(global.CORE_CONFIG.Watchdog.Cooldown()) * time.Second)
 		cooldown = &until
 	}
+	global.CORE_LOG.Warn("account marked failure",
+		zap.Uint("account_id", acc.ID),
+		zap.Int("fail_count", fail),
+		zap.String("status", status),
+	)
 	_ = model.MarkAccountFailure(acc.ID, errMsg, fail, status, cooldown)
 }
 
@@ -247,6 +265,11 @@ func (r *Rotator) MarkModelExhausted(acc *model.Account, modelName, errMsg strin
 		delete(r.sticky, modelName)
 	}
 	r.mu.Unlock()
+	global.CORE_LOG.Warn("model quota exhausted, account temporarily blocked",
+		zap.Uint("account_id", acc.ID),
+		zap.String("model", modelName),
+		zap.Time("until", until),
+	)
 	_ = model.MarkAccountFailure(acc.ID, errMsg, 0, model.AccountStatusEnabled, nil)
 }
 

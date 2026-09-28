@@ -1,1 +1,8 @@
+# 日志级别：debug / info / warn / error，默认 info。
+# 日志写入 log/，按天切割，保留 30 天。
+zap:
+  level: info
+  director: log
+  retention-day: 30
+  log-in-console: false
 system:

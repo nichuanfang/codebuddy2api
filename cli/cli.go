@@ -21,6 +21,7 @@ var (
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", "config.yaml", "config file path")
 	rootCmd.PersistentFlags().String("api-key", "", "downstream OpenAI API key, overrides config and env")
+	rootCmd.PersistentFlags().String("log-level", "", "log level: debug|info|warn|error, overrides config and env")
 	rootCmd.AddCommand(command.NewServerCommand())
 	rootCmd.AddCommand(command.NewAuthCommand())
 	rootCmd.AddCommand(command.NewAccountCommand())

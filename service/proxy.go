@@ -37,6 +37,7 @@ type ChatRequestMeta struct {
 	ClientStream   bool
 	Body           []byte
 	ClientIP       string
+	RequestID      string
 	UserAgent      string
 
 	AffinityKey  string
@@ -346,6 +347,16 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	start := time.Now()
 	exclude := map[uint]struct{}{}
 	retries := global.CORE_CONFIG.Gateway.Retries()
+	global.CORE_LOG.Debug("relay request accepted",
+		zap.String("protocol", string(meta.Protocol)),
+		zap.String("model", meta.RequestedModel),
+		zap.String("upstream_model", meta.UpstreamModel),
+		zap.Bool("stream", meta.ClientStream),
+		zap.Int("body_bytes", len(meta.Body)),
+		zap.Int("retries", retries),
+		zap.String("request_id", requestIDFromContext(c)),
+		zap.String("client_ip", meta.ClientIP),
+	)
 	var lastErr string
 	var lastUpstreamStatus int
 	var lastUpstreamRaw []byte
@@ -358,6 +369,11 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			break
 		}
 		exclude[acc.ID] = struct{}{}
+		global.CORE_LOG.Debug("relay attempt started",
+			zap.Int("attempt", i+1),
+			zap.Uint("account_id", acc.ID),
+			zap.String("upstream_model", meta.UpstreamModel),
+		)
 		if ShouldRefresh(acc.JWT, time.Hour) {
 			if refreshErr := p.refresher.RefreshAccount(c.Request.Context(), acc); refreshErr != nil {
 				global.CORE_LOG.Warn("preemptive refresh failed", zap.Uint("account_id", acc.ID), zap.Error(refreshErr))
@@ -421,7 +437,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			if isUpstreamModelUnavailable(raw) && maybeRewriteUnavailableModel(meta) {
 				global.CORE_LOG.Warn("upstream model unavailable, retrying same account with fallback",
 					zap.Uint("account_id", acc.ID),
-					zap.String("error", lastErr),
+					zap.Int("upstream_status", resp.StatusCode),
 					zap.String("fallback", meta.UpstreamModel))
 				resp, cancel, err = p.doUpstreamAttempt(c.Request.Context(), acc, path, meta.Body)
 				if err != nil {
@@ -447,7 +463,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 			if isUnapprovedChannel(raw) && !wafRetried {
 				wafRetried = true
 				global.CORE_LOG.Warn("upstream blocked by security policy, escalating sanitize and retrying",
-					zap.Uint("account_id", acc.ID), zap.String("error", lastErr))
+					zap.Uint("account_id", acc.ID), zap.Int("upstream_status", resp.StatusCode))
 				if retryWAFRejectedBody(meta) {
 					delete(exclude, acc.ID)
 					i--
@@ -456,7 +472,7 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 				global.CORE_LOG.Warn("escalating sanitize produced no change, giving up", zap.Uint("account_id", acc.ID))
 			}
 			if isUpstreamRequestError(raw) {
-				global.CORE_LOG.Warn("upstream rejected request without burning account", zap.Uint("account_id", acc.ID), zap.String("error", lastErr))
+				global.CORE_LOG.Warn("upstream rejected request without burning account", zap.Uint("account_id", acc.ID), zap.Int("upstream_status", resp.StatusCode))
 			} else {
 				p.rotator.MarkFailure(acc, lastErr)
 			}
@@ -477,6 +493,14 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 	if lastErr == "" {
 		lastErr = "no available codebuddy account"
 	}
+	global.CORE_LOG.Error("relay request failed",
+		zap.String("protocol", string(meta.Protocol)),
+		zap.String("model", meta.RequestedModel),
+		zap.String("upstream_model", meta.UpstreamModel),
+		zap.Int("upstream_status", lastUpstreamStatus),
+		zap.Duration("latency", time.Since(start)),
+		zap.String("request_id", requestIDFromContext(c)),
+	)
 	if lastUpstreamStatus != 0 && len(lastUpstreamRaw) > 0 {
 		gatewayErrorFromUpstream(c, meta.Protocol, upstreamGatewayStatus(lastUpstreamStatus, lastUpstreamRaw), lastErr, lastUpstreamRaw, lastUpstreamRequestID)
 		return
@@ -791,6 +815,7 @@ func attachClientMeta(c *gin.Context, meta *ChatRequestMeta) {
 		return
 	}
 	meta.ClientIP = c.ClientIP()
+	meta.RequestID = requestIDFromContext(c)
 	meta.UserAgent = clipText(c.Request.UserAgent(), 240)
 }
 func logResponsesPrepareError(c *gin.Context, raw []byte, err error) {
@@ -852,6 +877,26 @@ func (p *Proxy) observeUsage(acc *model.Account, meta *ChatRequestMeta, start ti
 	}
 	if usage.TotalTokens > 0 {
 		NoteModelCost(acc.ID, meta.UpstreamModel, usage.Credit, usage.TotalTokens)
+	}
+
+	fields := []zap.Field{
+		zap.String("protocol", string(meta.Protocol)),
+		zap.String("model", meta.RequestedModel),
+		zap.String("upstream_model", meta.UpstreamModel),
+		zap.Uint("account_id", acc.ID),
+		zap.Int("status", status),
+		zap.Int("prompt_tokens", usage.PromptTokens),
+		zap.Int("completion_tokens", usage.CompletionTokens),
+		zap.Int("total_tokens", usage.TotalTokens),
+		zap.Float64("credit", usage.Credit),
+		zap.Int64("latency_ms", usage.LatencyMs),
+		zap.String("request_id", meta.RequestID),
+		zap.String("upstream_request_id", usage.RequestID),
+	}
+	if status == http.StatusOK {
+		global.CORE_LOG.Info("relay request completed", fields...)
+	} else {
+		global.CORE_LOG.Warn("relay request finished with error", fields...)
 	}
 }
 func openaiError(c *gin.Context, status int, msg string) {

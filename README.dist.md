@@ -67,14 +67,14 @@ experimental_bearer_token = "sk-change-me"
 ## 常用命令
 Windows（PowerShell）：
 ```powershell
-.\codebuddy-gateway.exe server        # 前台运行，方便看日志
+.\codebuddy-gateway.exe server        # 前台启动；默认日志写入 log/
 .\codebuddy-gateway.exe auth login    # 手动触发登录
 .\codebuddy-gateway.exe account list  # 查看已导入账号
 .\stop.ps1                            # 停止后台服务
 ```
 macOS / Linux：
 ```bash
-./codebuddy-gateway server             # 前台运行，方便看日志
+./codebuddy-gateway server             # 前台启动；默认日志写入 log/
 ./codebuddy-gateway auth login         # 手动触发登录
 ./codebuddy-gateway auth login --no-browser
 ./codebuddy-gateway account list       # 查看已导入账号
@@ -87,9 +87,27 @@ macOS 在 Finder 双击 `CodeBuddy2API.app` 会像 Windows 一样自动检查账
 如果通过 LaunchAgent 自启动，请勿移动发行目录；移动后重新运行安装脚本。Linux 停止前台服务按 Ctrl+C，后台服务请用对应的服务管理器停止。
 默认监听 `127.0.0.1:8088`，仅本机可访问。如需局域网访问，把 `system.listenAddr`
 改为 `0.0.0.0:8088`，并务必关闭免密模式、设置足够复杂的 Key。
+## 日志
+日志默认写入发行目录的 `log/`，按天切割、保留 30 天；级别由 `config.yaml` 的 `zap` 段控制：
+```yaml
+zap:
+  level: info           # debug / info / warn / error，越大越安静
+  director: log         # 日志目录
+  retention-day: 30     # 保留天数
+  log-in-console: false # 后台服务默认不刷控制台；前台调试可改 true
+```
+- `info`（默认）：启动、每个请求、选号与账号状态变化、看门狗/凭证刷新结果。
+- `warn`：只在异常时输出（上游报错、账号被冷却、认证失败等），日志最干净。
+- `error`：只保留真正的错误。
+- `debug`：额外打印每次上游请求/响应、选号细节，排障时用；量很大，平时不要开。
+也可以不改文件，用命令行或环境变量临时覆盖：
+```powershell
+.\codebuddy-gateway.exe server --log-level debug
+$env:GATEWAY_LOG_LEVEL = "warn"; .\codebuddy-gateway.exe server
+```
 ## 遇到问题
 - 启动没反应：Windows 双击无窗口时查看 `log/desktop-login.log`；
-  macOS/Linux 在终端直接运行可看到实时输出，日志同样在 `log/` 目录。
+  服务日志默认写入 `log/` 目录；需要在终端同步查看时，将 `zap.log-in-console` 设为 `true`。
 - 想临时免密：把 `passwordless.enabled` 改为 `true`，仅对 `/v1/*` 生效，
   服务不再提供控制台。
 - 所有配置项、代理、模型别名、多账号策略等说明见 `config.reference.yaml`。

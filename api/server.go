@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"codebuddy-gateway/api/handler"
+	"codebuddy-gateway/api/middleware"
 	"codebuddy-gateway/global"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +24,7 @@ func NewAPIServer() *APIServer {
 func (b *APIServer) ServerRun() {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
-	engine.Use(gin.Recovery(), corsMiddleware(), gin.Logger())
+	engine.Use(gin.Recovery(), corsMiddleware(), middleware.AccessLog())
 
 	handler.RegisterRoutes(engine)
 

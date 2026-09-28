@@ -12,6 +12,16 @@ system:
   db: sqlite
   # 0.0.0.0:8088 = 本机 + 局域网；127.0.0.1:8088 = 仅本机
   listenAddr: "127.0.0.1:8088"
+# 日志：日常排障主要看这里。
+# level 可选 debug / info / warn / error，越大越安静；info 为默认值。
+# 调试上游交互、看每次选号时改成 debug。
+zap:
+  level: info
+  # 日志目录（相对发行目录），按天切割，保留 retention-day 天。
+  director: log
+  retention-day: 30
+  # 后台服务默认不往控制台刷日志；前台手动运行想看实时输出时改为 true。
+  log-in-console: false
 # 免密模式：true 时 /v1/* 不校验下游 API Key。
 # 建议同时把 system.listenAddr 改为 127.0.0.1:8088。
 passwordless:

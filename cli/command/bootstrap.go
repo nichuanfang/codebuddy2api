@@ -11,8 +11,10 @@ import (
 func Bootstrap(cmd *cobra.Command) {
 	configFile, _ := cmd.Flags().GetString("config")
 	apiKey, _ := cmd.Flags().GetString("api-key")
+	logLevel, _ := cmd.Flags().GetString("log-level")
 	global.CORE_VP = core.Viper(configFile)
 	core.ApplyKeyOverrides(apiKey)
+	core.ApplyLogLevelOverrides(logLevel)
 	if global.CORE_LOG == nil {
 		global.CORE_LOG = core.Zap()
 	}
@@ -28,6 +30,7 @@ func HasAccounts(configPath string) (bool, error) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("config", configPath, "")
 	cmd.Flags().String("api-key", "", "")
+	cmd.Flags().String("log-level", "", "")
 	Bootstrap(cmd)
 	accounts, err := model.ListAccounts()
 	core.CloseDB()

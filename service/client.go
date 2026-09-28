@@ -15,6 +15,8 @@ import (
 
 	"codebuddy-gateway/global"
 	"codebuddy-gateway/model"
+
+	"go.uber.org/zap"
 )
 
 var gzipWriterPool = sync.Pool{
@@ -182,7 +184,26 @@ func (c *UpstreamClient) doJSON(ctx context.Context, method, path string, acc *m
 	if compressed {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
-	return c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if global.CORE_LOG != nil {
+			global.CORE_LOG.Warn("upstream request failed",
+				zap.String("path", path),
+				zap.Uint("account_id", acc.ID),
+				zap.Int("body_bytes", len(payload)),
+				zap.Error(err),
+			)
+		}
+		return nil, err
+	}
+	if global.CORE_LOG != nil {
+		global.CORE_LOG.Debug("upstream responded",
+			zap.String("path", path),
+			zap.Uint("account_id", acc.ID),
+			zap.Int("status", resp.StatusCode),
+		)
+	}
+	return resp, nil
 }
 
 func applyCodeBuddyHeaders(req *http.Request, jwt, intent string) {

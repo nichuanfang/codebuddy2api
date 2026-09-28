@@ -33,7 +33,7 @@ start-on-login.command      # 登录后自启动安装/卸载脚本（仅 macOS 
 3. 服务只提供 `/v1/*` 和 `/healthz`；浏览器控制台已移除，账号管理请使用命令行。
 如果双击后没有反应，查看当前目录的 `log/desktop-login.log`、`log/gateway.stderr.log`。
 ### 手动命令行启动
-需要查看日志或调试时仍可使用：
+需要前台启动时仍可使用（日志默认写入 `log/`；设 `zap.log-in-console: true` 可同时输出到终端）：
 ```powershell
 .\codebuddy-gateway.exe server
 ```
@@ -47,7 +47,7 @@ macOS 发布包提供 Intel（x64）与 Apple 芯片（arm64）两个版本，�
 解压后修改同目录的 `config.yaml`，在 Finder 中双击 `CodeBuddy2API.app`，启动逻辑与 Windows 一致：
 ```bash
 chmod +x ./codebuddy-gateway
-./codebuddy-gateway server  # 可选：终端前台运行/调试
+./codebuddy-gateway server  # 可选：前台运行（默认日志写入 log/）
 ```
 首次双击会自动打开浏览器完成 CodeBuddy 登录，随后后台启动服务；已完成登录后再次双击会提示运行状态。
 若 macOS 阻止首次启动，在 Finder 中按住 Control 点击 `CodeBuddy2API.app`，选「打开」并确认；
@@ -148,6 +148,25 @@ model_auto_compact_token_limit = 900000
 - 多账号支持 sticky、least_used、round_robin；结合额度、失败冷却和实测 `usage.credit` 选择账号。
 - 上游 HTTP 连接复用、HTTP/2、长流式响应和 gzip 请求均已启用；流式响应不使用容易截断长回答的总超时。
 - SSE 流会检测正常结束标志、提前 EOF、解析错误和上游静默；异常时返回协议级失败事件，不会把截断内容伪装成成功。
+## 日志
+日志默认写入运行目录的 `log/`，按天切割、保留 30 天，级别由 `config.yaml` 的 `zap` 段控制：
+```yaml
+zap:
+  level: info           # debug / info / warn / error，越大越安静
+  director: log         # 日志目录
+  retention-day: 30     # 保留天数
+  log-in-console: false # 后台服务默认不刷控制台；前台调试可改 true
+```
+- `info`（默认）：启动、每个请求、选号与账号状态变化、看门狗/凭证刷新结果。
+- `warn`：只在异常时输出（上游报错、账号被冷却、认证失败等），日志最干净。
+- `error`：只保留真正的错误。
+- `debug`：额外打印每次上游请求/响应、选号细节，排障时用；量很大，平时不要开。
+不改文件也可以临时覆盖：
+```powershell
+.\codebuddy-gateway.exe server --log-level debug
+$env:GATEWAY_LOG_LEVEL = "warn"   # 也支持 GATEWAY_LOG_DIR / GATEWAY_LOG_CONSOLE
+```
+每个 HTTP 请求日志都有 `request_id`；推理请求完成日志还包含协议、模型、账号、token 用量和耗时，可按 `request_id` 在 `log/` 中串联排查。
 ## 配置原则
 日常只需要修改 `config.yaml` 中的：
 ```yaml

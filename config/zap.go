@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"time"
 
 	"go.uber.org/zap/zapcore"
@@ -18,13 +19,22 @@ type Zap struct {
 	RetentionDay  int    `mapstructure:"retention-day" json:"retention-day" yaml:"retention-day"`    // 日志保留天数
 }
 
-// Levels 根据字符串转化为 zapcore.Levels
-func (c *Zap) Levels() []zapcore.Level {
-	levels := make([]zapcore.Level, 0, 7)
-	level, err := zapcore.ParseLevel(c.Level)
+// Level 归一化后的日志级别（debug/info/warn/error/dpanic/panic/fatal）。
+// 空值或无法识别的值回落为 info，作为网关的默认日志级别。
+func (c *Zap) LogLevel() zapcore.Level {
+	level, err := zapcore.ParseLevel(strings.TrimSpace(c.Level))
 	if err != nil {
-		level = zapcore.DebugLevel
+		return zapcore.InfoLevel
 	}
+	return level
+}
+
+// Levels 根据字符串转化为 zapcore.Levels。
+// 只保留「配置级别及以上」的日志分片：每个级别只记录自身等级，语义与默认
+// 配置一致，同时避免 debug 级别时同时写 7 份内容完全相同的文件。
+func (c *Zap) Levels() []zapcore.Level {
+	level := c.LogLevel()
+	levels := make([]zapcore.Level, 0, int(zapcore.FatalLevel-level)+1)
 	for ; level <= zapcore.FatalLevel; level++ {
 		levels = append(levels, level)
 	}

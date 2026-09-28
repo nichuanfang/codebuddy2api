@@ -31,9 +31,14 @@ func ServerCommandFunc(cmd *cobra.Command, args []string) {
 	// Codex/SSH 的 PTY 关掉时会给当前进程组发 SIGHUP。忽略它，避免「动一动进程就没了」。
 	signal.Ignore(syscall.SIGHUP)
 	writePIDFile()
-	global.CORE_LOG.Info("gateway keys loaded",
+	global.CORE_LOG.Info("gateway starting",
+		zap.String("version", global.CORE_APP_VERSION),
 		zap.String("api_key", service.MaskToken(global.CORE_CONFIG.Gateway.APIKey)),
 		zap.String("listen", global.CORE_CONFIG.System.ListenAddr),
+		zap.String("log_level", global.CORE_CONFIG.Zap.Level),
+		zap.String("log_dir", global.CORE_CONFIG.Zap.Director),
+		zap.String("upstream", global.CORE_CONFIG.Gateway.UpstreamBase()),
+		zap.Bool("passwordless", global.CORE_CONFIG.Passwordless.Enabled),
 	)
 
 	app := api.NewAPIServer()

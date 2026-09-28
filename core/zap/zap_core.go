@@ -28,7 +28,7 @@ func newZapCore(level zapcore.Level) *zapCore {
 
 func (z *zapCore) writeSyncer(formats ...string) zapcore.WriteSyncer {
 	cutter := newCutter(
-		global.CORE_CONFIG.Zap.Director,
+		logDirector(),
 		z.level.String(),
 		global.CORE_CONFIG.Zap.RetentionDay,
 		cutterWithLayout(time.DateOnly),
@@ -38,6 +38,15 @@ func (z *zapCore) writeSyncer(formats ...string) zapcore.WriteSyncer {
 		return zapcore.AddSync(zapcore.NewMultiWriteSyncer(os.Stdout, cutter))
 	}
 	return zapcore.AddSync(cutter)
+}
+
+// logDirector 返回日志目录，空值时回落到 log/，与 Init 保持一致。
+func logDirector() string {
+	director := global.CORE_CONFIG.Zap.Director
+	if director == "" {
+		return "log"
+	}
+	return director
 }
 
 func (z *zapCore) Enabled(level zapcore.Level) bool {
