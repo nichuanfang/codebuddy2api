@@ -10,6 +10,5 @@ type CORE struct {
 	CodeBuddy    CodeBuddy    `mapstructure:"codebuddy" json:"codebuddy" yaml:"codebuddy"`
 	Refresh      Refresh      `mapstructure:"refresh" json:"refresh" yaml:"refresh"`
 	Watchdog     Watchdog     `mapstructure:"watchdog" json:"watchdog" yaml:"watchdog"`
-	Dashboard    Dashboard    `mapstructure:"dashboard" json:"dashboard" yaml:"dashboard"`
 	Passwordless Passwordless `mapstructure:"passwordless" json:"passwordless" yaml:"passwordless"`
 }

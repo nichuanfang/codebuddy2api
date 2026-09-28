@@ -31,7 +31,7 @@ func Viper(path ...string) *viper.Viper {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	v.AutomaticEnv()
 	_ = v.BindEnv("gateway.api-key", "GATEWAY_API_KEY", "API_KEY")
-	_ = v.BindEnv("gateway.admin-key", "GATEWAY_ADMIN_KEY", "ADMIN_KEY")
+
 	_ = v.BindEnv("system.listenAddr", "GATEWAY_LISTEN", "LISTEN_ADDR")
 
 	if err := v.Unmarshal(&global.CORE_CONFIG); err != nil {
@@ -40,12 +40,9 @@ func Viper(path ...string) *viper.Viper {
 	return v
 }
 
-func ApplyKeyOverrides(apiKey, adminKey string) {
+func ApplyKeyOverrides(apiKey string) {
 	if v := strings.TrimSpace(apiKey); v != "" {
 		global.CORE_CONFIG.Gateway.APIKey = v
-	}
-	if v := strings.TrimSpace(adminKey); v != "" {
-		global.CORE_CONFIG.Gateway.AdminKey = v
 	}
 }
 

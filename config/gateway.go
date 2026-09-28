@@ -7,7 +7,6 @@ import (
 
 type Gateway struct {
 	APIKey                   string       `mapstructure:"api-key" json:"api-key" yaml:"api-key"`
-	AdminKey                 string       `mapstructure:"admin-key" json:"admin-key" yaml:"admin-key"`
 	Upstream                 string       `mapstructure:"upstream" json:"upstream" yaml:"upstream"`
 	Gzip                     bool         `mapstructure:"gzip" json:"gzip" yaml:"gzip"`
 	Passthrough              bool         `mapstructure:"passthrough" json:"passthrough" yaml:"passthrough"`
@@ -17,7 +16,6 @@ type Gateway struct {
 	MaxRetries               int          `mapstructure:"max-retries" json:"max-retries" yaml:"max-retries"`
 	Rotate                   string       `mapstructure:"rotate" json:"rotate" yaml:"rotate"`
 	TrustEnvProxy            bool         `mapstructure:"trust-env-proxy" json:"trust-env-proxy" yaml:"trust-env-proxy"`
-	Capture                  string       `mapstructure:"capture" json:"capture" yaml:"capture"`
 	Proxy                    string       `mapstructure:"proxy" json:"proxy" yaml:"proxy"`
 	ModelAlias               []ModelAlias `mapstructure:"model-alias" json:"model-alias" yaml:"model-alias"`
 	FallbackModel            string       `mapstructure:"fallback-model" json:"fallback-model" yaml:"fallback-model"`
@@ -66,21 +64,18 @@ func (g Gateway) UpstreamBase() string {
 	}
 	return g.Upstream
 }
-
 func (g Gateway) Timeout() int {
 	if g.TimeoutSeconds <= 0 {
 		return 300
 	}
 	return g.TimeoutSeconds
 }
-
 func (g Gateway) Retries() int {
 	if g.MaxRetries <= 0 {
 		return 3
 	}
 	return g.MaxRetries
 }
-
 func (g Gateway) StreamIdleTimeout() time.Duration {
 	if g.StreamIdleTimeoutSeconds <= 0 {
 		return 300 * time.Second
@@ -106,49 +101,42 @@ func (c CodeBuddy) HeaderIDEType() string {
 	}
 	return c.IDEType
 }
-
 func (c CodeBuddy) HeaderIDEVersion() string {
 	if c.IDEVersion == "" {
 		return "4.9.7"
 	}
 	return c.IDEVersion
 }
-
 func (c CodeBuddy) HeaderProductVersion() string {
 	if c.ProductVersion != "" {
 		return c.ProductVersion
 	}
 	return c.HeaderIDEVersion()
 }
-
 func (c CodeBuddy) HeaderProduct() string {
 	if c.Product == "" {
 		return "SaaS"
 	}
 	return c.Product
 }
-
 func (c CodeBuddy) HeaderDomain() string {
 	if c.Domain == "" {
 		return "www.codebuddy.cn"
 	}
 	return c.Domain
 }
-
 func (c CodeBuddy) HeaderEnvID() string {
 	if c.EnvID == "" {
 		return "production"
 	}
 	return c.EnvID
 }
-
 func (c CodeBuddy) HeaderAgentIntent() string {
 	if c.AgentIntent == "" {
 		return "craft"
 	}
 	return c.AgentIntent
 }
-
 func (c CodeBuddy) BillingBaseURL() string {
 	if c.BillingBase == "" {
 		return "https://www.codebuddy.cn"
@@ -169,14 +157,12 @@ func (r Refresh) Spec() string {
 	}
 	return r.Cron
 }
-
 func (r Refresh) Threshold() int {
 	if r.ThresholdDays <= 0 {
 		return 30
 	}
 	return r.ThresholdDays
 }
-
 func (r Refresh) Timeout() int {
 	if r.TimeoutSeconds <= 0 {
 		return 15
@@ -199,14 +185,12 @@ func (w Watchdog) Interval() int {
 	}
 	return w.IntervalSeconds
 }
-
 func (w Watchdog) FailLimit() int {
 	if w.FailThreshold <= 0 {
 		return 3
 	}
 	return w.FailThreshold
 }
-
 func (w Watchdog) Cooldown() int {
 	if w.CooldownSeconds <= 0 {
 		return 600

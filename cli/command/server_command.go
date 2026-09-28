@@ -34,7 +34,6 @@ func ServerCommandFunc(cmd *cobra.Command, args []string) {
 	global.CORE_LOG.Info("gateway keys loaded",
 		zap.String("api_key", service.MaskToken(global.CORE_CONFIG.Gateway.APIKey)),
 		zap.String("listen", global.CORE_CONFIG.System.ListenAddr),
-		zap.Bool("dev", global.CORE_DEV),
 	)
 
 	app := api.NewAPIServer()

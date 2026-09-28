@@ -11,12 +11,8 @@ import (
 func Bootstrap(cmd *cobra.Command) {
 	configFile, _ := cmd.Flags().GetString("config")
 	apiKey, _ := cmd.Flags().GetString("api-key")
-	adminKey, _ := cmd.Flags().GetString("admin-key")
-	dev, _ := cmd.Flags().GetBool("dev")
-	global.CORE_DEV = dev
-
 	global.CORE_VP = core.Viper(configFile)
-	core.ApplyKeyOverrides(apiKey, adminKey)
+	core.ApplyKeyOverrides(apiKey)
 	if global.CORE_LOG == nil {
 		global.CORE_LOG = core.Zap()
 	}
@@ -28,14 +24,10 @@ func Bootstrap(cmd *cobra.Command) {
 	}
 }
 
-// HasAccounts 初始化配置和数据库，仅用于桌面启动入口判断是否需要首次登录。
-// 调用方会在进程结束前继续使用该数据库，或直接退出进程。
 func HasAccounts(configPath string) (bool, error) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("config", configPath, "")
 	cmd.Flags().String("api-key", "", "")
-	cmd.Flags().String("admin-key", "", "")
-	cmd.Flags().Bool("dev", false, "")
 	Bootstrap(cmd)
 	accounts, err := model.ListAccounts()
 	core.CloseDB()
