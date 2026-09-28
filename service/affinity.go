@@ -43,15 +43,26 @@ func RequestAffinityKey(headers http.Header, body []byte) string {
 }
 
 func requestSessionIdentity(headers http.Header, payload map[string]any) (string, string) {
-	for _, name := range []string{"X-Session-Id", "X-Conversation-Id"} {
+	// Codex sends these lowercase hyphenated headers. Keep explicit session
+	// identity ahead of per-thread/per-request fallbacks so a conversation with
+	// follow-up threads still pins to one caller/model/account binding.
+	for _, name := range []string{"X-Session-Id", "session-id"} {
 		if value := strings.TrimSpace(headers.Get(name)); value != "" {
-			return strings.ToLower(name), value
+			return "session_id", value
 		}
 	}
-	for _, name := range []string{"prompt_cache_key", "conversation_id", "session_id"} {
+	for _, name := range []string{"prompt_cache_key", "conversation_id"} {
 		if value := strings.TrimSpace(asString(payload[name])); value != "" {
 			return name, value
 		}
+	}
+	for _, name := range []string{"X-Conversation-Id", "thread-id", "x-client-request-id"} {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return "thread_id", value
+		}
+	}
+	if value := strings.TrimSpace(asString(payload["session_id"])); value != "" {
+		return "session_id", value
 	}
 
 	messages, ok := payload["messages"].([]any)
