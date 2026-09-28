@@ -97,6 +97,28 @@ $env:GATEWAY_PASSWORDLESS = "true"
 - `GET /healthz`
 `/v1/models` 优先读取 CodeBuddy 实时模型目录，并缓存 5 分钟；上游不可用时回退到本地目录。常见旧模型名可通过 `gateway.model-alias` 映射到当前模型。
 `/v1/messages/count_tokens` 默认使用本地估算。如需读取上游真实 usage，可设置 `gateway.count-tokens-mode: upstream`；该模式会发起一次最小生成请求，可能消耗上游额度。
+### Codex 推荐配置
+
+用户级 `~/.codex/config.toml` 可按下面方式接入本网关；请把 `experimental_bearer_token` 换成 `gateway.api-key`：
+
+```toml
+model_provider = "custom"
+model = "deepseek-v4.1-flash"
+model_reasoning_effort = "high"
+
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+
+[model_providers.custom]
+name = "custom"
+wire_api = "responses"
+requires_openai_auth = false
+base_url = "http://127.0.0.1:8088/v1"
+experimental_bearer_token = "sk-change-me"
+```
+
+网关是 CodeBuddy Chat Completions 上游与 Responses 协议之间的无状态转换桥：普通消息历史由 Codex 完整重放，网关只在当前进程内缓存最近的工具调用和 compact 摘要用于恢复。`store`、`include`、`text`、`prompt_cache_key` 只影响 Codex 侧请求语义，不会透传给上游 Chat 请求；`reasoning.effort` 与 `reasoning.summary` 分别映射为 CodeBuddy 的 `reasoningEffort` 和 `reasoning_summary`，`reasoning.encrypted_content` 会被忽略且不会伪造。Codex 配置禁用搜索时仍可能发送 `web_search` 工具；该 hosted tool 会被安全降级，日志默认不再重复告警。
+
 ### Codex 上下文窗口
 上下文窗口由 Codex 客户端的 `model_context_window` 与 `model_auto_compact_token_limit` 决定；Responses 请求本身不会携带这两个配置值。网关不会按本地模型目录中的 `max_input` 截断请求，而是完整转发 Codex 已组装的上下文。例如 1M 上下文可在 Codex 的 `config.toml` 中配置：
 ```toml
