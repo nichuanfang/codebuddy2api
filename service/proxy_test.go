@@ -99,3 +99,25 @@ func TestRewriteSSELineKeepsCacheFields(t *testing.T) {
 		t.Fatalf("usage=%+v", usage)
 	}
 }
+
+func TestOnlyWebSearchDowngrade(t *testing.T) {
+	cases := []struct {
+		name  string
+		tools []string
+		want  bool
+	}{
+		{name: "nil"},
+		{name: "empty", tools: []string{}},
+		{name: "single web search", tools: []string{"web_search"}, want: true},
+		{name: "duplicate web search", tools: []string{"web_search", "web_search"}, want: true},
+		{name: "other hosted tool", tools: []string{"web_search", "file_search"}},
+		{name: "other tool", tools: []string{"file_search"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := onlyWebSearchDowngrade(tc.tools); got != tc.want {
+				t.Fatalf("onlyWebSearchDowngrade(%v)=%v want=%v", tc.tools, got, tc.want)
+			}
+		})
+	}
+}

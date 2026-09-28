@@ -835,12 +835,30 @@ func logResponsesDowngrade(meta *ChatRequestMeta, c *gin.Context) {
 	if len(meta.ResponsesDowngradedTools) == 0 && len(meta.ResponsesDowngradedItems) == 0 {
 		return
 	}
-	global.CORE_LOG.Warn("Responses request downgraded unsupported capabilities",
-		zap.String("model", meta.RequestedModel),
-		zap.Strings("tools", meta.ResponsesDowngradedTools),
-		zap.Strings("items", meta.ResponsesDowngradedItems),
-		zap.String("request_id", requestIDFromContext(c)),
-	)
+	// Codex can advertise web_search even when its own config disables it. The
+	// harmless, repeated downgrade is high-volume and drowns real failures, so
+	// keep only hosted-history or non-web-search downgrades at warn level.
+	level := zap.WarnLevel
+	if len(meta.ResponsesDowngradedItems) == 0 && onlyWebSearchDowngrade(meta.ResponsesDowngradedTools) {
+		level = zap.DebugLevel
+	}
+	if ce := global.CORE_LOG.Check(level, "Responses request downgraded unsupported capabilities"); ce != nil {
+		ce.Write(
+			zap.String("model", meta.RequestedModel),
+			zap.Strings("tools", meta.ResponsesDowngradedTools),
+			zap.Strings("items", meta.ResponsesDowngradedItems),
+			zap.String("request_id", requestIDFromContext(c)),
+		)
+	}
+}
+
+func onlyWebSearchDowngrade(tools []string) bool {
+	for _, tool := range tools {
+		if tool != "web_search" {
+			return false
+		}
+	}
+	return len(tools) > 0
 }
 func requestModelFromRaw(raw []byte) string {
 	var body map[string]any
