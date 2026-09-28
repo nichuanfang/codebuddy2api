@@ -525,7 +525,8 @@ func (a *responsesAdapter) finish() error {
 		status = "incomplete"
 		eventType = "response.incomplete"
 	}
-	a.emit(eventType, map[string]any{"response": a.full(status)})
+	response := a.full(status, status != "failed")
+	a.emit(eventType, map[string]any{"response": response})
 	return a.err
 }
 func (a *responsesAdapter) ensureTextItem() {
@@ -573,7 +574,7 @@ func cloneToolState(st *toolStreamState) *toolStreamState {
 	cp := *st
 	return &cp
 }
-func (a *responsesAdapter) full(status string) map[string]any {
+func (a *responsesAdapter) full(status string, endTurn bool) map[string]any {
 	type outputEntry struct {
 		index int
 		item  map[string]any
@@ -633,13 +634,7 @@ func (a *responsesAdapter) full(status string) map[string]any {
 			"content": []any{map[string]any{"type": "output_text", "text": ""}},
 		})
 	}
-	usage := map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-	if a.usage != nil {
-		usage["input_tokens"] = a.usage.PromptTokens
-		usage["output_tokens"] = a.usage.CompletionTokens
-		usage["total_tokens"] = a.usage.TotalTokens
-	}
-	attachResponsesCacheUsage(usage, a.usage)
+	usage := responsesUsageObject(a.usage)
 	var incomplete any
 	if status == "incomplete" {
 		incomplete = map[string]any{"reason": "max_output_tokens"}
@@ -648,13 +643,14 @@ func (a *responsesAdapter) full(status string) map[string]any {
 		"id": a.id, "object": "response", "created_at": a.created, "status": status,
 		"model": a.model, "output": output, "usage": usage, "error": nil,
 		"incomplete_details": incomplete,
+		"end_turn":           endTurn,
 	}
 }
 func (a *responsesAdapter) fail(err error) error {
 	a.closeReasoning()
 	a.closeText()
 	a.closeTools()
-	response := a.full("failed")
+	response := a.full("failed", false)
 	code, message := "upstream_stream_error", err.Error()
 	var upstreamErr *upstreamSSEError
 	if errors.As(err, &upstreamErr) {
@@ -960,7 +956,7 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 	// termination. When it is set the adapter has NOT been finished or
 	// failed yet, so a truncated tool call can still be resumed below.
 	var failure error
-	streamLoop:
+streamLoop:
 	for {
 		event, err := decoder.next()
 		if err == io.EOF {
@@ -1053,7 +1049,7 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 	}
 	if meta.Protocol == ProtocolResponses && !meta.Compact && p.history != nil && !responsesFinishReasonIsLength(finishReason) {
 		if adapter, ok := em.(*responsesAdapter); ok {
-			p.history.record(adapter.full("completed"), meta.historyScope)
+			p.history.record(adapter.full("completed", true), meta.historyScope)
 		}
 	}
 	return usage, nil

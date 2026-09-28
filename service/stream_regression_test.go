@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -192,4 +193,79 @@ func TestStreamIdleWatchdogCancelsAndStops(t *testing.T) {
 	if ctx.Err() == nil {
 		t.Fatal("watchdog did not cancel upstream context")
 	}
+}
+
+func TestResponsesTerminalEventCarriesCodexUsageAndEndTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		reason string
+		event  string
+		status string
+	}{
+		{name: "completed", reason: "stop", event: "response.completed", status: "completed"},
+		{name: "incomplete", reason: "length", event: "response.incomplete", status: "incomplete"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			ad := newStreamAdapter(ProtocolResponses, &buf, nil, "model")
+			ad.start()
+			ad.setUsage(&parsedUsage{PromptTokens: 11, CompletionTokens: 7, TotalTokens: 18, CacheHitTokens: 3, ThinkingTokens: 5})
+			ad.onText("answer")
+			ad.onFinishReason(tc.reason)
+			if err := ad.finish(); err != nil {
+				t.Fatal(err)
+			}
+
+			raw := buf.String()
+			if !strings.Contains(raw, "event: response.created") {
+				t.Fatalf("created event missing stable id: %s", raw)
+			}
+			if !strings.Contains(raw, "event: "+tc.event) || strings.Contains(raw, "event: response.failed") {
+				t.Fatalf("terminal event mismatch: %s", raw)
+			}
+			if !strings.Contains(raw, `"status":"`+tc.status+`"`) || !strings.Contains(raw, `"end_turn":true`) {
+				t.Fatalf("terminal status/end_turn missing: %s", raw)
+			}
+			usage := []string{
+				`"input_tokens":11`, `"output_tokens":7`, `"total_tokens":18`,
+				`"input_tokens_details":{"cached_tokens":3}`, `"output_tokens_details":{"reasoning_tokens":5}`,
+			}
+			for _, field := range usage {
+				if !strings.Contains(raw, field) {
+					t.Fatalf("terminal usage missing %s: %s", field, raw)
+				}
+			}
+			// The created and terminal response envelopes must retain the same response ID.
+			if !sameCreatedAndTerminalResponseID(t, raw) {
+				t.Fatalf("terminal response did not reuse created id: %s", raw)
+			}
+		})
+	}
+}
+
+func TestResponsesFailedEventHasStableIDAndError(t *testing.T) {
+	var buf bytes.Buffer
+	ad := newStreamAdapter(ProtocolResponses, &buf, nil, "model")
+	ad.start()
+	ad.onText("partial")
+	if err := ad.fail(errSSEMissingEnd); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.String()
+	if !strings.Contains(raw, "event: response.failed") || !sameCreatedAndTerminalResponseID(t, raw) {
+		t.Fatalf("failed event missing stable id: %s", raw)
+	}
+	if !strings.Contains(raw, `"code":"upstream_stream_error"`) || !strings.Contains(raw, "normal termination") {
+		t.Fatalf("failed event error details missing: %s", raw)
+	}
+	if strings.Contains(raw, `"end_turn":true`) {
+		t.Fatalf("failed response must not claim end_turn: %s", raw)
+	}
+}
+
+func sameCreatedAndTerminalResponseID(t *testing.T, raw string) bool {
+	t.Helper()
+	created := regexp.MustCompile(`event: response\.created\s*\n\s*data: \{[^\n]*?"response":\{[^\n]*?"id":"([^"]+)"`).FindStringSubmatch(raw)
+	terminal := regexp.MustCompile(`event: response\.(?:completed|incomplete|failed)\s*\n\s*data: \{[^\n]*?"response":\{[^\n]*?"id":"([^"]+)"`).FindStringSubmatch(raw)
+	return created != nil && terminal != nil && created[1] == terminal[1] && created[1] != ""
 }

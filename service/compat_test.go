@@ -1421,3 +1421,69 @@ func TestResponsesStreamAdapterIncludesCacheUsage(t *testing.T) {
 		t.Fatalf("input_tokens_details missing: %s", s)
 	}
 }
+
+func TestResponsesJSONHasCodexUsageAndEndTurn(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	encoded, err := encodeResponsesJSON(&ChatResult{
+		ID:      "resp_json",
+		Model:   "glm-5.3",
+		Content: "answer",
+		Usage: &parsedUsage{
+			PromptTokens: 13, CompletionTokens: 6, TotalTokens: 19,
+			CacheHitTokens: 4, ThinkingTokens: 2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(encoded, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["id"] != "resp_json" || response["end_turn"] != true {
+		t.Fatalf("response identity/end_turn: %s", encoded)
+	}
+	usage, _ := response["usage"].(map[string]any)
+	if usage == nil || usage["input_tokens"] != float64(13) || usage["output_tokens"] != float64(6) || usage["total_tokens"] != float64(19) {
+		t.Fatalf("usage=%v response=%s", usage, encoded)
+	}
+	inputDetails, _ := usage["input_tokens_details"].(map[string]any)
+	outputDetails, _ := usage["output_tokens_details"].(map[string]any)
+	if inputDetails == nil || inputDetails["cached_tokens"] != float64(4) {
+		t.Fatalf("input usage details=%v", inputDetails)
+	}
+	if outputDetails == nil || outputDetails["reasoning_tokens"] != float64(2) {
+		t.Fatalf("output usage details=%v", outputDetails)
+	}
+}
+
+func TestResponsesRequestMappingIgnoresStatefulControls(t *testing.T) {
+	global.CORE_CONFIG.Gateway = config.Gateway{Passthrough: true}
+	meta, err := PrepareResponsesBody([]byte(`{
+		"model":"glm-5.3",
+		"input":"hello",
+		"store":false,
+		"include":["reasoning.encrypted_content"],
+		"prompt_cache_key":"cache-key",
+		"text":{"verbosity":"low"},
+		"reasoning":{"effort":"high","summary":"auto","encrypted_content":"opaque"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"store", "include", "prompt_cache_key", "text"} {
+		if _, ok := body[key]; ok {
+			t.Fatalf("Responses-only field %q leaked upstream: %s", key, meta.Body)
+		}
+	}
+	if body["reasoningEffort"] != "high" || body["reasoning_summary"] != "auto" {
+		t.Fatalf("reasoning mapping: %s", meta.Body)
+	}
+	if _, ok := body["reasoning"]; ok {
+		t.Fatalf("reasoning object leaked upstream: %s", meta.Body)
+	}
+}

@@ -94,19 +94,7 @@ func encodeResponsesCompactionJSON(result *ChatResult) ([]byte, error) {
 	}
 	id := ensureID(result.ID, "resp_")
 	rememberCompactState(id, summary)
-	usage := map[string]any{
-		"input_tokens":  result.Usage.PromptTokens,
-		"output_tokens": result.Usage.CompletionTokens,
-		"total_tokens":  result.Usage.TotalTokens,
-		"input_tokens_details": map[string]any{
-			"cached_tokens":      result.Usage.CacheHitTokens,
-			"cache_write_tokens": result.Usage.CacheWriteTokens,
-		},
-		"output_tokens_details": map[string]any{
-			"reasoning_tokens": result.Usage.ThinkingTokens,
-		},
-	}
-	attachResponsesCacheUsage(usage, result.Usage)
+	usage := responsesUsageObject(result.Usage)
 	resp := map[string]any{
 		"id":         id,
 		"object":     "response.compaction",
@@ -227,15 +215,8 @@ func encodeResponsesJSONWithRegistry(result *ChatResult, registry *responseToolR
 		"output":             output,
 		"error":              nil,
 		"incomplete_details": incompleteDetails,
-		"usage": func() map[string]any {
-			usage := map[string]any{
-				"input_tokens":  result.Usage.PromptTokens,
-				"output_tokens": result.Usage.CompletionTokens,
-				"total_tokens":  result.Usage.TotalTokens,
-			}
-			attachResponsesCacheUsage(usage, result.Usage)
-			return usage
-		}(),
+		"usage":              responsesUsageObject(result.Usage),
+		"end_turn":           true,
 	}
 	return json.Marshal(resp)
 }
@@ -364,4 +345,21 @@ func estimateTokenCount(raw []byte) int {
 		return 1
 	}
 	return n
+}
+
+func responsesUsageObject(u *parsedUsage) map[string]any {
+	if u == nil {
+		u = &parsedUsage{}
+	}
+	usage := map[string]any{
+		"input_tokens":  u.PromptTokens,
+		"output_tokens": u.CompletionTokens,
+		"total_tokens":  u.TotalTokens,
+	}
+	attachResponsesCacheUsage(usage, u)
+	// Codex parses these detail objects as optional, but including them makes
+	// token/context accounting deterministic across chat, compact, and SSE.
+	usage["input_tokens_details"] = map[string]any{"cached_tokens": cacheHitTokens(u)}
+	usage["output_tokens_details"] = map[string]any{"reasoning_tokens": u.ThinkingTokens}
+	return usage
 }
