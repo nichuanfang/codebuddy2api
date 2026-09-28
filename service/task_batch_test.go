@@ -19,7 +19,7 @@ func TestBatchStartRejectsConcurrentRun(t *testing.T) {
 	b.state = &BatchState{ID: "x", Running: true, Total: 1, Results: []BatchAccountResult{{Status: "running"}}}
 	b.mu.Unlock()
 
-	if _, err := b.Start(nil, 1); err == nil {
+	if _, err := b.Run(nil, nil, 1); err == nil {
 		t.Fatal("上一批在跑时应拒绝启动")
 	} else if !strings.Contains(err.Error(), "仍在执行") {
 		t.Fatalf("错误信息应说明原因，实际: %v", err)

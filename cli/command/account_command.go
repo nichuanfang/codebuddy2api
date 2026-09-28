@@ -1,16 +1,14 @@
 package command
 
 import (
-	"errors"
-	"fmt"
-	"os"
-	"text/tabwriter"
-
 	"codebuddy-gateway/core"
 	"codebuddy-gateway/model"
 	"codebuddy-gateway/service"
-
+	"errors"
+	"fmt"
 	"github.com/spf13/cobra"
+	"os"
+	"text/tabwriter"
 )
 
 func NewAccountCommand() *cobra.Command {
@@ -18,10 +16,9 @@ func NewAccountCommand() *cobra.Command {
 		Use:   "account",
 		Short: "Import and list local CodeBuddy accounts",
 	}
-	cmd.AddCommand(newAccountImportCommand(), newAccountImportDesktopCommand(), newAccountListCommand())
+	cmd.AddCommand(newAccountImportCommand(), newAccountImportDesktopCommand(), newAccountListCommand(), newAccountTaskCommand())
 	return cmd
 }
-
 func newAccountImportCommand() *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
@@ -65,7 +62,6 @@ func newAccountImportCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "parse only, do not write the database")
 	return cmd
 }
-
 func newAccountImportDesktopCommand() *cobra.Command {
 	var dryRun bool
 	var path string
@@ -114,14 +110,11 @@ func TryImportDesktopAccounts(configPath string) (created, updated int, found bo
 	cmd := &cobra.Command{}
 	cmd.Flags().String("config", configPath, "")
 	cmd.Flags().String("api-key", "", "")
-	cmd.Flags().String("admin-key", "", "")
-	cmd.Flags().Bool("dev", false, "")
 	Bootstrap(cmd)
 	defer core.CloseDB()
 	created, updated, err = service.ImportDesktopAccounts(items)
 	return created, updated, true, err
 }
-
 func newAccountListCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:          "list",
