@@ -32,21 +32,8 @@ func historyScopeFor(headers http.Header, queryKey string, raw []byte) responseH
 	if credential == "" {
 		credential = queryKey
 	}
-	credential = strings.TrimSpace(credential)
-	if len(credential) >= 7 && strings.EqualFold(credential[:7], "bearer ") {
-		credential = strings.TrimSpace(credential[7:])
-	}
-	session := firstHeader(headers, "X-Session-Id", "X-Conversation-Id")
-	if session == "" {
-		var body map[string]any
-		if json.Unmarshal(raw, &body) == nil {
-			for _, name := range []string{"prompt_cache_key", "conversation_id", "session_id"} {
-				if session = strings.TrimSpace(asString(body[name])); session != "" {
-					break
-				}
-			}
-		}
-	}
+	credential = normalizeBearerCredential(credential)
+	session := codexSessionIdentity(headers, raw)
 	// The configured gateway key may be shared by trusted clients. Never use
 	// the first user message as a session identity for tool-call fallback.
 	sum := sha256.Sum256([]byte(credential + "\x00" + session))
@@ -357,4 +344,39 @@ func (s *responseHistoryStore) enrich(raw []byte, scope responseHistoryScope) ([
 	}
 	body["input"] = out
 	return json.Marshal(body)
+}
+
+func normalizeBearerCredential(credential string) string {
+	credential = strings.TrimSpace(credential)
+	if len(credential) >= 7 && strings.EqualFold(credential[:7], "bearer ") {
+		return strings.TrimSpace(credential[7:])
+	}
+	return credential
+}
+
+func codexSessionIdentity(headers http.Header, raw []byte) string {
+	for _, name := range []string{"X-Session-Id", "session-id"} {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return value
+		}
+	}
+	var body map[string]any
+	if json.Unmarshal(raw, &body) == nil {
+		for _, name := range []string{"prompt_cache_key", "conversation_id"} {
+			if value := strings.TrimSpace(asString(body[name])); value != "" {
+				return value
+			}
+		}
+	}
+	for _, name := range []string{"X-Conversation-Id", "thread-id", "x-client-request-id"} {
+		if value := strings.TrimSpace(headers.Get(name)); value != "" {
+			return value
+		}
+	}
+	if json.Unmarshal(raw, &body) == nil {
+		if value := strings.TrimSpace(asString(body["session_id"])); value != "" {
+			return value
+		}
+	}
+	return ""
 }

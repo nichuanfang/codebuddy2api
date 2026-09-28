@@ -370,3 +370,48 @@ func TestResponsesUpstreamErrorAfterPartialText(t *testing.T) {
 		t.Fatalf("partial stream error=%v body=%s", err, recorder.Body.String())
 	}
 }
+
+func codexHistoryScope(sessionHeader, value, credential string) responseHistoryScope {
+	headers := http.Header{"Authorization": []string{credential}}
+	headers.Set(sessionHeader, value)
+	return historyScopeFor(headers, "", []byte(`{"model":"glm-5.3"}`))
+}
+
+func TestResponsesHistoryRecognizesCodexSessionHeaders(t *testing.T) {
+	store := newResponseHistoryStore()
+	credential := "Bearer private-key"
+	scope := codexHistoryScope("session-id", "codex-session-a", credential)
+	store.record(testToolResponse("resp_codex_session", testCall("call_codex", "read_file", "function_call")), scope)
+	if !scope.hasSession {
+		t.Fatal("Codex session-id did not create a session-scoped history key")
+	}
+
+	output := []byte(`{"model":"glm-5.3","input":[{"type":"function_call_output","call_id":"call_codex","output":"ok"}]}`)
+	if _, err := store.enrich(output, scope); err != nil {
+		t.Fatalf("Codex session tool history restore: %v", err)
+	}
+	if _, err := store.enrich(output, codexHistoryScope("session-id", "codex-session-b", credential)); err == nil {
+		t.Fatal("different Codex session restored tool history")
+	}
+	if _, err := store.enrich(output, codexHistoryScope("session-id", "codex-session-a", "Bearer another-key")); err == nil {
+		t.Fatal("same Codex session crossed caller credentials")
+	}
+}
+
+func TestResponsesHistoryCodexThreadIdentityIsScoped(t *testing.T) {
+	store := newResponseHistoryStore()
+	credential := "Bearer private-key"
+	scope := codexHistoryScope("thread-id", "codex-thread-a", credential)
+	store.record(testToolResponse("resp_codex_thread", testCall("call_thread", "read_file", "function_call")), scope)
+	if !scope.hasSession {
+		t.Fatal("Codex thread-id did not create a scoped history key")
+	}
+
+	output := []byte(`{"model":"glm-5.3","input":[{"type":"function_call_output","call_id":"call_thread","output":"ok"}]}`)
+	if _, err := store.enrich(output, scope); err != nil {
+		t.Fatalf("thread-scoped restore: %v", err)
+	}
+	if _, err := store.enrich(output, codexHistoryScope("thread-id", "codex-thread-a", "Bearer another-key")); err == nil {
+		t.Fatal("thread identity crossed caller credentials")
+	}
+}
