@@ -135,6 +135,21 @@ func collectSSEWithStart(r io.Reader, requestedModel string, streamStart time.Ti
 	result.Content = content.String()
 	result.Reasoning = reasoning.String()
 	result.ToolCalls = sortedToolCalls(tools)
+	// A function call whose arguments are not valid JSON cannot be delivered:
+	// the client would fail the whole turn trying to parse it. Treat it like a
+	// truncated upstream stream so the caller reports a clean failure.
+	for i := range result.ToolCalls {
+		tc := &result.ToolCalls[i]
+		if tc.Arguments == "" || strings.TrimSpace(tc.Arguments) == "" {
+			continue
+		}
+		if isFreeformTool(tc.Name) {
+			continue
+		}
+		if !json.Valid([]byte(strings.TrimSpace(tc.Arguments))) {
+			return nil, errSSEMissingEnd
+		}
+	}
 	if result.FinishReason == "" {
 		if len(result.ToolCalls) > 0 {
 			result.FinishReason = "tool_calls"

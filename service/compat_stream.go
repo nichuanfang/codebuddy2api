@@ -463,6 +463,14 @@ func (a *responsesAdapter) closeTools() {
 			a.emitCustomToolCall(st)
 			continue
 		}
+		// Never finalize a function call whose arguments are not valid JSON:
+		// the client cannot parse it and would fail the whole turn with an
+		// opaque error. The resume path repairs most of these before finish;
+		// any that remain are dropped rather than emitted half-baked.
+		if toolCallArgsIncomplete(st) {
+			st.closed = true
+			continue
+		}
 		if !st.opened {
 			if st.callID == "" && st.name == "" && st.args == "" {
 				continue
@@ -948,32 +956,31 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 	defer watchdog.stop()
 	stopHeartbeat := startSSEHeartbeat(sink)
 	defer stopHeartbeat()
+	// failure records an upstream stream that ended without normal
+	// termination. When it is set the adapter has NOT been finished or
+	// failed yet, so a truncated tool call can still be resumed below.
+	var failure error
+	streamLoop:
 	for {
 		event, err := decoder.next()
 		if err == io.EOF {
 			if !normalSSETermination(false, finishReason) {
-				failure := wrapUpstreamStream(errSSEMissingEnd)
-				em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
-				_ = em.fail(failure)
-				return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
+				failure = wrapUpstreamStream(errSSEMissingEnd)
+				break streamLoop
 			}
-			break
+			break streamLoop
 		}
 		if err != nil {
-			failure := streamReadError(err, watchdog, c.Request.Context())
-			em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
-			_ = em.fail(failure)
-			return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
+			failure = streamReadError(err, watchdog, c.Request.Context())
+			break streamLoop
 		}
 		watchdog.touch()
 		if upstreamErr := event.upstreamError(); upstreamErr != nil {
-			failure := wrapUpstreamStream(upstreamErr)
-			em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
-			_ = em.fail(failure)
-			return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
+			failure = wrapUpstreamStream(upstreamErr)
+			break streamLoop
 		}
 		if event.Done {
-			break
+			break streamLoop
 		}
 		if event.FinishReason != "" {
 			finishReason = event.FinishReason
@@ -991,8 +998,45 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 		usage = mergeUsage(usage, parsed)
 		applyChunkToAdapter(em, event.Chunk)
 	}
+
+	// Repair a tool call whose argument JSON never finished streaming. This
+	// covers both a hard EOF mid-arguments and a finish_reason while the
+	// arguments payload is still invalid JSON. It must run before any
+	// em.fail/em.finish, which would close the tool state and emit a terminal
+	// event the client cannot recover from.
+	if extra, recovered, resumeErr := p.resumeTruncatedToolCalls(c, meta, em); resumeErr != nil {
+		failure = wrapUpstreamStream(resumeErr)
+	} else {
+		if extra != nil {
+			usage = mergeUsage(usage, extra)
+		}
+		if recovered {
+			// The recovered attempt defines the real ending: clear the
+			// interrupted stream's failure and stale finish_reason so the
+			// response is neither failed nor reported as length-truncated.
+			failure = nil
+			finishReason = ""
+		}
+	}
+
+	// A tool call whose arguments are still not valid JSON must never be
+	// emitted as a completed call: the client cannot parse it and the turn
+	// dies with an opaque error. Report a protocol failure instead.
+	if resumer, ok := em.(incompleteToolCallResumer); ok && len(resumer.incompleteToolCalls()) > 0 {
+		failure = wrapUpstreamStream(errSSEMissingEnd)
+		em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
+		_ = em.fail(failure)
+		return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
+	}
+
+	if failure != nil {
+		em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
+		_ = em.fail(failure)
+		return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
+	}
+
 	if extra, nudgeErr := p.nudgePreambleIfNeeded(c, meta, em); nudgeErr != nil {
-		failure := wrapUpstreamStream(nudgeErr)
+		failure = wrapUpstreamStream(nudgeErr)
 		em.setUsage(usageWithStreamMeta(usage, firstTokenMs, reqID))
 		_ = em.fail(failure)
 		return usageWithStreamMeta(usage, firstTokenMs, reqID), failure
