@@ -207,13 +207,29 @@ func SaveAccountTokens(id uint, jwt, refreshToken string, jwtExp, refreshExp *ti
 
 func MarkAccountUsed(id uint) error {
 	now := time.Now()
-	return MustDB().Model(&Account{}).Where("id = ?", id).Updates(map[string]any{
-		"last_used_at":   now,
-		"fail_count":     0,
-		"last_error":     "",
-		"status":         AccountStatusEnabled,
-		"cooldown_until": nil,
-	}).Error
+	// 不能无条件把 status 重置成 enabled：成功回来的请求往往是几分钟前发出的，
+	// 期间同一账号可能已被另一个失败请求打进 cooldown。这里一旦覆盖，
+	// 冷却中的账号会立刻回到可用池，下一轮又被选中、又失败，来回抖动。
+	// 所以只清失败痕迹，状态只在「当前不是冷却」时才抬回 enabled；
+	// 冷却中的账号由看门狗按额度统一收敛，不由这里越权恢复。
+	res := MustDB().Model(&Account{}).
+		Where("id = ? AND status != ?", id, AccountStatusCooldown).
+		Updates(map[string]any{
+			"last_used_at":   now,
+			"fail_count":     0,
+			"last_error":     "",
+			"status":         AccountStatusEnabled,
+			"cooldown_until": nil,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		return nil
+	}
+	// 命中冷却分支：只更新使用时间，不碰状态。
+	return MustDB().Model(&Account{}).Where("id = ?", id).
+		Updates(map[string]any{"last_used_at": now}).Error
 }
 
 func MarkAccountFailure(id uint, errMsg string, failCount int, status string, cooldown *time.Time) error {

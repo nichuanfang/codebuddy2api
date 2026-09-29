@@ -241,3 +241,55 @@ func TestSessionAffinityStaysAndFailsOver(t *testing.T) {
 		t.Fatalf("session did not fail over: got=%d want=%d", failover.ID, b.ID)
 	}
 }
+
+func TestMarkAccountUsedDoesNotOverrideCooldown(t *testing.T) {
+	defer setupRotatorDB(t)()
+	acc := addRotatorAccount(t, "a", "jwt-a", 10, true, 0)
+	// 模拟另一个失败请求把账号打进冷却
+	until := time.Now().Add(time.Hour)
+	if err := model.MarkAccountFailure(acc.ID, "boom", 3, model.AccountStatusCooldown, &until); err != nil {
+		t.Fatal(err)
+	}
+	// 一个较早发出的成功请求完成，调用 MarkAccountUsed
+	if err := model.MarkAccountUsed(acc.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := model.GetAccountByID(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.AccountStatusCooldown {
+		t.Fatalf("MarkAccountUsed overrode cooldown: status=%s want %s", got.Status, model.AccountStatusCooldown)
+	}
+	if got.CooldownUntil == nil {
+		t.Fatal("MarkAccountUsed cleared cooldown_until of a cooling account")
+	}
+	if got.LastUsedAt == nil {
+		t.Fatal("MarkAccountUsed should still update last_used_at")
+	}
+}
+
+func TestMarkAccountUsedResetsFailureOnEnabledAccount(t *testing.T) {
+	defer setupRotatorDB(t)()
+	acc := addRotatorAccount(t, "a", "jwt-a", 10, true, 0)
+	// 未达阈值的失败，账号仍 enabled
+	if err := model.MarkAccountFailure(acc.ID, "boom", 1, model.AccountStatusEnabled, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := model.MarkAccountUsed(acc.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := model.GetAccountByID(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != model.AccountStatusEnabled {
+		t.Fatalf("status=%s want enabled", got.Status)
+	}
+	if got.FailCount != 0 {
+		t.Fatalf("fail_count=%d want 0", got.FailCount)
+	}
+	if got.LastError != "" {
+		t.Fatalf("last_error=%q want empty", got.LastError)
+	}
+}
