@@ -950,8 +950,15 @@ func (p *Proxy) writeCompatStream(c *gin.Context, resp *http.Response, meta *Cha
 	var finishReason string
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
 	defer watchdog.stop()
-	stopHeartbeat := startSSEHeartbeat(sink)
+	stopHeartbeat, heartbeatDead := startSSEHeartbeat(sink)
 	defer stopHeartbeat()
+	go func() {
+		select {
+		case <-heartbeatDead:
+			cancel()
+		case <-c.Request.Context().Done():
+		}
+	}()
 	// failure records an upstream stream that ended without normal
 	// termination. When it is set the adapter has NOT been finished or
 	// failed yet, so a truncated tool call can still be resumed below.
@@ -1139,15 +1146,19 @@ type sseActivitySource interface {
 	LastWrite() time.Time
 }
 
-func startSSEHeartbeat(w io.Writer) func() {
+// startSSEHeartbeat 返回一个 stop 函数。心跳写失败（下游已死）时通过
+	// returned channel 通知一次；调用方应监听并取消上游请求，避免客户端
+	// 断开后网关仍长时间持有上游连接。
+	func startSSEHeartbeat(w io.Writer) (func(), <-chan struct{}) {
 	return startSSEHeartbeatInterval(w, sseHeartbeatInterval)
 }
-func startSSEHeartbeatInterval(w io.Writer, interval time.Duration) func() {
+func startSSEHeartbeatInterval(w io.Writer, interval time.Duration) (func(), <-chan struct{}) {
 	if interval <= 0 {
 		interval = sseHeartbeatInterval
 	}
 	done := make(chan struct{})
 	finished := make(chan struct{})
+	dead := make(chan struct{})
 	var once sync.Once
 	go func() {
 		defer close(finished)
@@ -1165,6 +1176,7 @@ func startSSEHeartbeatInterval(w io.Writer, interval time.Duration) func() {
 					}
 				}
 				if _, err := io.WriteString(w, sseHeartbeatFrame); err != nil {
+					close(dead)
 					return
 				}
 			}
@@ -1173,5 +1185,5 @@ func startSSEHeartbeatInterval(w io.Writer, interval time.Duration) func() {
 	return func() {
 		once.Do(func() { close(done) })
 		<-finished
-	}
+	}, dead
 }

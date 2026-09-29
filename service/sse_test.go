@@ -27,7 +27,7 @@ func TestSSESinkSerializesHeartbeatAndEvents(t *testing.T) {
 	var buf safeBuffer
 	sink := newSSESink(&buf, nil)
 
-	stop := startSSEHeartbeatInterval(sink, 2*time.Millisecond)
+	stop, _ := startSSEHeartbeatInterval(sink, 2*time.Millisecond)
 	defer stop()
 
 	var wg sync.WaitGroup
@@ -70,7 +70,7 @@ func TestSSESinkSerializesHeartbeatAndEvents(t *testing.T) {
 func TestSSEHeartbeatStops(t *testing.T) {
 	var buf safeBuffer
 	sink := newSSESink(&buf, nil)
-	stop := startSSEHeartbeatInterval(sink, time.Millisecond)
+	stop, _ := startSSEHeartbeatInterval(sink, time.Millisecond)
 	time.Sleep(5 * time.Millisecond)
 	stop()
 	time.Sleep(8 * time.Millisecond)
