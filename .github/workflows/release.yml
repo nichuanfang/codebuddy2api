@@ -139,6 +139,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # git-cliff 需要完整历史和标签来计算上一个版本到当前 tag 的变更。
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Generate release change outline
+        uses: orhun/git-cliff-action@v4
+        id: release_outline
+        with:
+          config: cliff.toml
+          args: --latest --github-repo ${{ github.repository }}
+
+      - name: Publish outline to job summary
+        shell: bash
+        env:
+          RELEASE_NOTES: ${{ steps.release_outline.outputs.content }}
+        run: |
+          printf '%s\n' "$RELEASE_NOTES"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            printf '%s\n' "$RELEASE_NOTES" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Download packages
         uses: actions/download-artifact@v8
@@ -152,12 +173,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_NOTES: ${{ steps.release_outline.outputs.content }}
         shell: bash
         run: |
+          set -euo pipefail
+          if [[ -n "$RELEASE_NOTES" ]]; then
+            notes_args=(--notes "$RELEASE_NOTES")
+          else
+            # 兜底保留 GitHub 自动生成发布说明的能力。
+            notes_args=(--generate-notes)
+          fi
+
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" release/*.zip --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" "${notes_args[@]}"
           else
-            args=("$TAG" release/*.zip --title "$TAG" --generate-notes)
+            args=("$TAG" release/*.zip --title "$TAG" "${notes_args[@]}")
             if [[ "$PRERELEASE" == "true" ]]; then
               args+=(--prerelease)
             fi

@@ -1,0 +1,36 @@
+[changelog]
+header = ""
+body = """
+## 📋 本次改动大纲
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.breaking %}[**破坏性**] {% endif %}{{ commit.message | upper_first }}{% if commit.id %} (`{{ commit.id | truncate(length=7, end="") }}`){% endif %}
+{% endfor %}
+{% endfor %}
+{% if previous %}
+**Full Changelog**: https://github.com/nichuanfang/codebuddy2api/compare/{{ previous.version }}...{{ version }}
+{% endif %}
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+commit_parsers = [
+  { message = "^feat", group = "✨ 新增与增强" },
+  { message = "^fix", group = "🐛 问题修复" },
+  { message = "^perf", group = "⚡ 性能优化" },
+  { message = "^refactor", group = "♻️ 重构" },
+  { message = "^test", group = "🧪 测试" },
+  { message = "^doc", group = "📝 文档" },
+  { message = "^style", group = "🎨 样式与格式" },
+  { message = "^revert", group = "⏪ 回滚" },
+  { message = "^chore|^build|^ci|^deps", group = "⚙️ 构建 / CI / 工程化" },
+  { message = ".*", group = "📌 其他变更" },
+]
+protect_breaking_commits = true
+tag_pattern = "v.*"
+sort_commits = "oldest"
