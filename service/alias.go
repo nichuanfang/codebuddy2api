@@ -6,9 +6,17 @@ import (
 	"sync"
 
 	"codebuddy-gateway/global"
+	"codebuddy-gateway/model"
 )
 
 const defaultFallbackModel = "deepseek-v4.1-flash"
+
+// builtinModelAliases 记录 CodeBuddy 上游改过的模型 ID。
+// 旧名仍被 /v1/models 广告（面板与本地兜底目录都会展示），
+// 但真正发往上游前必须换成上游当前认可的 ID。
+// 权威定义放在 model 包，避免两处清单漂移。
+// 用户名下的 gateway.model-alias 优先级更高。
+var builtinModelAliases = model.BuiltinModelAliases
 
 var goodModelCache struct {
 	mu   sync.Mutex
@@ -21,6 +29,9 @@ func ResolveModelAlias(name string) string {
 		if alias.From == name && alias.To != "" {
 			return alias.To
 		}
+	}
+	if to, ok := builtinModelAliases[name]; ok && to != "" && to != name {
+		return to
 	}
 	if isOpenAIHostedModel(name) {
 		if fallback := fallbackUpstreamModel(); fallback != "" && fallback != name {

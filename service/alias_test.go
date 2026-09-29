@@ -44,6 +44,41 @@ func TestResolveModelAliasUsesLastGoodModel(t *testing.T) {
 	}
 }
 
+// 上游把 hy4-preview/hy3-preview/kimi-k3 改名成带后缀的 ID。
+// 网关既要继续广告旧名（面板、本地兜底目录），又必须在转发前换成上游当前 ID。
+func TestResolveModelAliasBuiltinRenames(t *testing.T) {
+	resetGoodModelCache()
+	global.CORE_CONFIG.Gateway = config.Gateway{}
+	cases := []struct{ in, want string }{
+		{"hy4-preview", "hy4-preview-f"},
+		{"hy3-preview", "hy3-x"},
+		{"kimi-k3", "kimi-k3-1"},
+		// 当前 ID 必须原样透传，不能被改写。
+		{"hy4-preview-f", "hy4-preview-f"},
+		{"hy3-x", "hy3-x"},
+		{"kimi-k3-1", "kimi-k3-1"},
+		{"hy3", "hy3"},
+		{"glm-5.3", "glm-5.3"},
+		{"minimax-m3", "minimax-m3"},
+	}
+	for _, tc := range cases {
+		if got := ResolveModelAlias(tc.in); got != tc.want {
+			t.Fatalf("%s: got %s want %s", tc.in, got, tc.want)
+		}
+	}
+}
+
+// 用户配置的 model-alias 仍然要覆盖内置改名映射。
+func TestResolveModelAliasUserOverrideWins(t *testing.T) {
+	resetGoodModelCache()
+	global.CORE_CONFIG.Gateway = config.Gateway{
+		ModelAlias: []config.ModelAlias{{From: "kimi-k3", To: "glm-5.3"}},
+	}
+	if got := ResolveModelAlias("kimi-k3"); got != "glm-5.3" {
+		t.Fatalf("got %s want glm-5.3", got)
+	}
+}
+
 func TestIsOpenAIHostedModel(t *testing.T) {
 	yes := []string{"gpt-5.6-luna", "gpt-4", "o1", "o3-mini", "o4-mini", "codex-mini", "chatgpt-4o"}
 	no := []string{"", "deepseek-v4.1-flash", "glm-5.1", "hy3", "codebuddy-codex", "auto", "kimi-k3"}
