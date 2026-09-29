@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	cfgpkg "codebuddy-gateway/config"
 	"codebuddy-gateway/global"
 
 	"github.com/spf13/viper"
@@ -43,7 +44,8 @@ func Viper(path ...string) *viper.Viper {
 	_ = v.BindEnv("zap.director", "GATEWAY_LOG_DIR")
 	_ = v.BindEnv("zap.log-in-console", "GATEWAY_LOG_CONSOLE")
 
-	if err := v.Unmarshal(&global.CORE_CONFIG); err != nil {
+	// gateway.models 支持裸字符串简写，需要 decode hook 才能落到 ModelEntry。
+	if err := v.Unmarshal(&global.CORE_CONFIG, viper.DecodeHook(cfgpkg.ModelDecodeHook())); err != nil {
 		panic(err)
 	}
 	return v

@@ -1,8 +1,11 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"time"
+
+	"github.com/mitchellh/mapstructure"
 )
 
 type Gateway struct {
@@ -19,6 +22,9 @@ type Gateway struct {
 	Proxy                    string       `mapstructure:"proxy" json:"proxy" yaml:"proxy"`
 	ModelAlias               []ModelAlias `mapstructure:"model-alias" json:"model-alias" yaml:"model-alias"`
 	FallbackModel            string       `mapstructure:"fallback-model" json:"fallback-model" yaml:"fallback-model"`
+	// Models 是 /v1/models 的显式覆盖列表。为空时沿用 CodeBuddy 实时目录
+	// 与内置兜底目录；配置后该列表优先，且顺序即为返回顺序。
+	Models []ModelEntry `mapstructure:"models" json:"models" yaml:"models"`
 	// SanitizeMode 控制发往上游前的清洗力度：
 	//   ""/"harness"（默认）——覆盖全部常见触发面：客户端模板（system/developer）、
 	//                          harness 注入的 user 上下文、tool 定义，以及随会话累积的
@@ -53,9 +59,87 @@ func (g Gateway) SanitizeModeName() string {
 	}
 }
 
+// ModelEntry 让用户在 config.yaml 里手工维护 /v1/models 的展示列表。
+// 直接写 model-id 字符串，或用 {id, display-name} 形式补充显示名。
+type ModelEntry struct {
+	ID          string `mapstructure:"id" json:"id" yaml:"id"`
+	DisplayName string `mapstructure:"display-name" json:"display-name" yaml:"display-name"`
+}
+
+func (m *ModelEntry) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var id string
+	if err := unmarshal(&id); err == nil {
+		m.ID = id
+		return nil
+	}
+	type raw ModelEntry
+	var r raw
+	if err := unmarshal(&r); err != nil {
+		return err
+	}
+	*m = ModelEntry(r)
+	return nil
+}
+
+// Normalize 去掉空白 ID，并在只有 display-name 时兜底用 ID 作为标识。
+func (m ModelEntry) Normalize() (ModelEntry, bool) {
+	m.ID = strings.TrimSpace(m.ID)
+	m.DisplayName = strings.TrimSpace(m.DisplayName)
+	if m.ID == "" {
+		return ModelEntry{}, false
+	}
+	if m.DisplayName == "" {
+		m.DisplayName = m.ID
+	}
+	return m, true
+}
+
 type ModelAlias struct {
 	From string `mapstructure:"from" json:"from" yaml:"from"`
 	To   string `mapstructure:"to" json:"to" yaml:"to"`
+}
+
+// ConfiguredModels 返回配置里手工维护的模型列表（已归一化）。
+// 第二个返回值表示用户是否真的配置过 models 覆盖项。
+func (g Gateway) ConfiguredModels() ([]ModelEntry, bool) {
+	if len(g.Models) == 0 {
+		return nil, false
+	}
+	out := make([]ModelEntry, 0, len(g.Models))
+	seen := map[string]struct{}{}
+	for _, m := range g.Models {
+		entry, ok := m.Normalize()
+		if !ok {
+			continue
+		}
+		if _, dup := seen[entry.ID]; dup {
+			continue
+		}
+		seen[entry.ID] = struct{}{}
+		out = append(out, entry)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// ModelEntryDecodeHook 让 mapstructure（viper.Unmarshal）也能接受
+// gateway.models 里的裸字符串写法。
+func ModelEntryDecodeHook(from reflect.Type, to reflect.Type, data any) (any, error) {
+	if to != reflect.TypeOf(ModelEntry{}) {
+		return data, nil
+	}
+	if from.Kind() == reflect.String {
+		return ModelEntry{ID: strings.TrimSpace(data.(string))}, nil
+	}
+	return data, nil
+}
+
+// ModelDecodeHook 供 viper.Unmarshal 使用：把 YAML 标量字符串
+// （gateway.models 里的裸 model-id）解码成 ModelEntry。
+func ModelDecodeHook() mapstructure.DecodeHookFunc {
+	return mapstructure.ComposeDecodeHookFunc(ModelEntryDecodeHook)
 }
 
 func (g Gateway) UpstreamBase() string {

@@ -30,15 +30,54 @@ type openaiModel struct {
 var liveModels = &modelCache{}
 
 func (p *Proxy) HandleModels(c *gin.Context) {
-	items, err := p.listLiveModels(c.Request.Context())
-	if err != nil {
-		global.CORE_LOG.Warn("upstream models failed, fallback to local catalog", zap.Error(err))
-		items = localOpenAIModels()
+	// 用户在 config.yaml 里手写了 gateway.models 时，它是唯一的权威列表：
+	// 既不合并上游目录，也不追加别名，保证返回顺序与配置完全一致。
+	if configured, ok := configuredOpenAIModels(); ok {
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   configured,
+		})
+		return
+	}
+
+	cliItems, cliErr := listCLIModels(c.Request.Context())
+	items := cliItems
+	if cliErr != nil {
+		global.CORE_LOG.Warn("codebuddy cli models failed, trying upstream config", zap.Error(cliErr))
+		upstreamItems, upstreamErr := p.listLiveModels(c.Request.Context())
+		if upstreamErr != nil {
+			global.CORE_LOG.Warn("upstream models failed, fallback to local catalog", zap.Error(upstreamErr))
+			items = localOpenAIModels()
+		} else {
+			items = upstreamItems
+		}
+	} else {
+		items = appendAliases(cliItems)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
 		"data":   items,
 	})
+}
+
+// configuredOpenAIModels 把 gateway.models 转成 /v1/models 的响应。
+// 第二个返回值表示用户是否配置过覆盖列表，用于区分「未配置」与「配置为空」。
+func configuredOpenAIModels() ([]openaiModel, bool) {
+	entries, ok := global.CORE_CONFIG.Gateway.ConfiguredModels()
+	if !ok {
+		return nil, false
+	}
+	now := time.Now().Unix()
+	out := make([]openaiModel, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, openaiModel{
+			ID:      e.ID,
+			Object:  "model",
+			Created: now,
+			OwnedBy: "codebuddy",
+		})
+	}
+	return out, true
 }
 
 func (p *Proxy) listLiveModels(ctx context.Context) ([]openaiModel, error) {
@@ -72,6 +111,10 @@ func (p *Proxy) listLiveModels(ctx context.Context) ([]openaiModel, error) {
 }
 
 var errEmptyUpstreamModels = errString("upstream returned no models")
+
+var errCLINotFound = errString("codebuddy cli not found")
+
+var errEmptyCLIModels = errString("codebuddy cli returned no models")
 
 type errString string
 
@@ -140,18 +183,16 @@ func appendAliases(items []openaiModel) []openaiModel {
 }
 
 func localOpenAIModels() []openaiModel {
-	list, err := model.ListEnabledModels()
+	list := model.Models()
 	now := time.Now().Unix()
 	out := make([]openaiModel, 0)
-	if err == nil {
-		for _, m := range list {
-			out = append(out, openaiModel{
-				ID:      m.ModelID,
-				Object:  "model",
-				Created: now,
-				OwnedBy: "codebuddy",
-			})
-		}
+	for _, m := range list {
+		out = append(out, openaiModel{
+			ID:      m.ModelID,
+			Object:  "model",
+			Created: now,
+			OwnedBy: "codebuddy",
+		})
 	}
 	return appendAliases(out)
 }
