@@ -25,6 +25,11 @@ const (
 type responseHistoryScope struct {
 	key        string
 	hasSession bool
+	// sharedCredential 表示本次请求用的是「可能被别人共享」的凭据：
+	// passwordless 模式（无凭据）或命中网关配置的共享 API key。
+	// 这时若没有显式 session 标识，不同客户端的 history 会混在同一 scope，
+	// A 会话的 previous_response_id 能被 B 会话续上，造成跨客户端上下文泄漏。
+	sharedCredential bool
 }
 
 func historyScopeFor(headers http.Header, queryKey string, raw []byte) responseHistoryScope {
@@ -37,7 +42,8 @@ func historyScopeFor(headers http.Header, queryKey string, raw []byte) responseH
 	// The configured gateway key may be shared by trusted clients. Never use
 	// the first user message as a session identity for tool-call fallback.
 	sum := sha256.Sum256([]byte(credential + "\x00" + session))
-	return responseHistoryScope{key: hex.EncodeToString(sum[:]), hasSession: session != ""}
+	shared := global.CORE_CONFIG.Passwordless.Enabled || credential == "" || credential == strings.TrimSpace(global.CORE_CONFIG.Gateway.APIKey)
+	return responseHistoryScope{key: hex.EncodeToString(sum[:]), hasSession: session != "", sharedCredential: shared}
 }
 
 type cachedToolResponse struct {
@@ -242,6 +248,12 @@ func (s *responseHistoryStore) enrich(raw []byte, scope responseHistoryScope) ([
 	}
 	previousID := strings.TrimSpace(asString(body["previous_response_id"]))
 	var previous *cachedToolResponse
+	if previousID != "" && scope.sharedCredential && !scope.hasSession {
+		// 共享凭据且没有显式 session：无法区分客户端，续接 history 会把别人的
+		// 上下文灌进这个请求。明确拒绝而不是静默混池，让调用方带上
+		// X-Session-Id / session_id 再来。
+		return nil, fmt.Errorf("previous_response_id requires a session identifier (X-Session-Id header or session_id field) when using a shared credential")
+	}
 	if previousID != "" {
 		previous, _ = s.snapshot(scope, previousID)
 		if _, compact := compactStateFor(previousID); !compact {

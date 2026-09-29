@@ -415,3 +415,54 @@ func TestResponsesHistoryCodexThreadIdentityIsScoped(t *testing.T) {
 		t.Fatal("thread identity crossed caller credentials")
 	}
 }
+
+func TestHistoryScopeSharedCredentialWithoutSessionRejected(t *testing.T) {
+	old := global.CORE_CONFIG.Passwordless.Enabled
+	global.CORE_CONFIG.Passwordless.Enabled = true
+	defer func() { global.CORE_CONFIG.Passwordless.Enabled = old }()
+
+	headers := http.Header{}
+	scope := historyScopeFor(headers, "", []byte("{\"model\":\"glm-5.3\"}"))
+	if !scope.sharedCredential {
+		t.Fatal("passwordless request should be marked as shared credential")
+	}
+	if scope.hasSession {
+		t.Fatal("no session header should yield hasSession=false")
+	}
+
+	store := newResponseHistoryStore()
+	body := []byte("{\"model\":\"glm-5.3\",\"previous_response_id\":\"resp_1\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"x\"}]}")
+	_, err := store.enrich(body, scope)
+	if err == nil {
+		t.Fatal("enrich should reject previous_response_id for shared, sessionless scope")
+	}
+}
+
+func TestHistoryScopeSharedCredentialWithSessionAllowed(t *testing.T) {
+	old := global.CORE_CONFIG.Passwordless.Enabled
+	global.CORE_CONFIG.Passwordless.Enabled = true
+	defer func() { global.CORE_CONFIG.Passwordless.Enabled = old }()
+
+	headers := http.Header{}
+	headers.Set("X-Session-Id", "sess-1")
+	scope := historyScopeFor(headers, "", []byte("{\"model\":\"glm-5.3\"}"))
+	if !scope.sharedCredential {
+		t.Fatal("passwordless request should still be shared credential")
+	}
+	if !scope.hasSession {
+		t.Fatal("explicit session header should yield hasSession=true")
+	}
+}
+
+func TestHistoryScopePrivateCredentialNotShared(t *testing.T) {
+	old := global.CORE_CONFIG.Passwordless.Enabled
+	global.CORE_CONFIG.Passwordless.Enabled = false
+	defer func() { global.CORE_CONFIG.Passwordless.Enabled = old }()
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer their-own-key")
+	scope := historyScopeFor(headers, "", []byte("{\"model\":\"glm-5.3\"}"))
+	if scope.sharedCredential {
+		t.Fatal("client-specific key should not be marked shared")
+	}
+}
