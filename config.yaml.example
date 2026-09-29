@@ -6,3 +6,11 @@ zap:
   retention-day: 30
   log-in-console: false
 system:
+
+# 可选：手工指定 /v1/models 返回的模型列表（顺序即返回顺序）。
+# 留空时沿用本机 CodeBuddy CLI 目录、CodeBuddy 实时目录与内置兜底目录；配置后此列表优先。
+# gateway:
+#   models:
+#     - hy4-preview-f
+#     - hy3
+#     - { id: glm-5.3-flashx, display-name: GLM-5.3-FlashX }

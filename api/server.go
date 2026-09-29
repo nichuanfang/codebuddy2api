@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"codebuddy-gateway/api/handler"
@@ -51,15 +52,28 @@ func (b *APIServer) ServerShutdown() {
 }
 
 func corsMiddleware() gin.HandlerFunc {
+	allowed := map[string]struct{}{}
+	for _, o := range global.CORE_CONFIG.System.AllowedOrigins {
+		if trimmed := strings.TrimSpace(o); trimmed != "" {
+			allowed[trimmed] = struct{}{}
+		}
+	}
 	return func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
+		_, whitelisted := allowed[origin]
+		if origin != "" && (len(allowed) == 0 || whitelisted) {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Vary", "Origin")
+		} else if origin == "" {
+			c.Header("Access-Control-Allow-Origin", "*")
 		}
-		c.Header("Access-Control-Allow-Origin", origin)
 		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, Token, X-Token, api-key, x-api-key, X-Api-Key, anthropic-version, anthropic-beta, anthropic-dangerous-direct-browser-access, openai-beta, OpenAI-Beta")
 		c.Header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE, PUT")
-		c.Header("Access-Control-Allow-Credentials", "true")
+		// credentials 只在白名单命中时才允许。无条件反射 Origin + Allow-Credentials: true
+		// 等于告诉浏览器「任何网站都能带凭据跨域调我」，passwordless 部署时是开口。
+		if whitelisted {
+			c.Header("Access-Control-Allow-Credentials", "true")
+		}
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
