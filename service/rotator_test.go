@@ -293,3 +293,26 @@ func TestMarkAccountUsedResetsFailureOnEnabledAccount(t *testing.T) {
 		t.Fatalf("last_error=%q want empty", got.LastError)
 	}
 }
+
+
+func TestMarkTransientFailureDoesNotCountOrCooldown(t *testing.T) {
+	defer setupRotatorDB(t)()
+	acc := addRotatorAccount(t, "a", "jwt-a", 10, true, 0)
+	r := NewRotator()
+	for i := 0; i < 5; i++ {
+		r.MarkTransientFailure(acc, "upstream stream idle timeout")
+	}
+	got, err := model.GetAccountByID(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FailCount != 0 {
+		t.Fatalf("transient failure incremented fail_count: %d", got.FailCount)
+	}
+	if got.Status != model.AccountStatusEnabled {
+		t.Fatalf("transient failure changed status: %s", got.Status)
+	}
+	if got.LastError == "" {
+		t.Fatal("transient failure should still record last_error for diagnostics")
+	}
+}

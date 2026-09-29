@@ -544,7 +544,13 @@ func (p *Proxy) commitSuccess(c *gin.Context, acc *model.Account, resp *http.Res
 			status = statusClientClosedRequest
 		case errors.Is(writeErr, errUpstreamStream):
 			status = http.StatusBadGateway
-			p.rotator.MarkFailure(acc, errMsg)
+			// 断流/idle 超时通常是网络路径问题，不是账号的错。
+			// 硬惩罚会把健康账号误打进冷却，这里只做软记录。
+			if errors.Is(writeErr, errStreamIdle) {
+				p.rotator.MarkTransientFailure(acc, errMsg)
+			} else {
+				p.rotator.MarkFailure(acc, errMsg)
+			}
 		default:
 			status = http.StatusInternalServerError
 		}
@@ -615,8 +621,15 @@ func (p *Proxy) writeStream(c *gin.Context, resp *http.Response, meta *ChatReque
 	doneSeen := false
 	watchdog := startStreamIdleWatchdog(c.Request.Context(), cancel, global.CORE_CONFIG.Gateway.StreamIdleTimeout())
 	defer watchdog.stop()
-	stopHeartbeat := startSSEHeartbeat(sink)
+	stopHeartbeat, heartbeatDead := startSSEHeartbeat(sink)
 	defer stopHeartbeat()
+	go func() {
+		select {
+		case <-heartbeatDead:
+			cancel()
+		case <-c.Request.Context().Done():
+		}
+	}()
 	for {
 		event, err := decoder.next()
 		if err == io.EOF {

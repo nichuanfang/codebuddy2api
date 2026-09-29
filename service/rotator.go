@@ -225,6 +225,21 @@ func (r *Rotator) MarkSuccessFor(acc *model.Account, modelName string) {
 	_ = model.MarkAccountUsed(acc.ID)
 }
 
+// MarkTransientFailure 记录一次「可能只是网络/路径问题」的失败。
+// 与 MarkFailure 的区别：只更新 last_error 供排查，不递增 fail_count、
+// 不触发冷却。断流、idle timeout 这类错误往往不是账号的错，
+// 硬惩罚会让网络抖动把健康账号打进冷却。
+func (r *Rotator) MarkTransientFailure(acc *model.Account, errMsg string) {
+	if acc == nil {
+		return
+	}
+	global.CORE_LOG.Warn("account transient failure (not counted)",
+		zap.Uint("account_id", acc.ID),
+		zap.String("error", clipText(errMsg, 200)),
+	)
+	_ = model.MarkAccountFailure(acc.ID, errMsg, acc.FailCount, model.AccountStatusEnabled, nil)
+}
+
 func (r *Rotator) MarkFailure(acc *model.Account, errMsg string) {
 	if acc == nil {
 		return
