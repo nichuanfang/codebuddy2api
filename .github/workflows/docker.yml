@@ -1,0 +1,100 @@
+name: Docker
+
+# 手动发布 Docker 镜像到 GHCR：构建 linux/amd64 单架构，
+# 标签从输入的 Git tag 推导（v1.2.3 -> 1.2.3，可选 latest）。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布标签，例如 v1.0.9（必须是已存在的 tag）"
+        required: true
+        type: string
+      latest:
+        description: "是否同时打 latest 标签"
+        required: false
+        default: true
+        type: boolean
+      push:
+        description: "是否推送到 GHCR；关闭时仅本地构建验证（dry-run）"
+        required: false
+        default: true
+        type: boolean
+
+# 用内置 GITHUB_TOKEN 即可推送 GHCR，无需额外配置 PAT。
+permissions:
+  contents: read
+  packages: write
+
+# 避免同一时间多次手动触发互相覆盖镜像；不取消进行中的发布。
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build and push linux/amd64 image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          # 检出指定 tag 构建，保证镜像与 release 产物同源。
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Docker Buildx
+        # 单 amd64 架构只需要 buildx，无需 QEMU 模拟。
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # 禁用默认的 latest=auto 行为，latest 完全由输入开关控制。
+          flavor: |
+            latest=false
+          tags: |
+            # 从输入的 tag 推导版本号：v1.2.3 -> 1.2.3；
+            # 非 semver 标签会在此步直接失败，避免推错标签。
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=raw,value=latest,enable=${{ inputs.latest }}
+
+      - name: Build (and optionally push) image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: ${{ inputs.push }}
+          # dry-run 时改为 load，把镜像导入本地完成全链路验证。
+          load: ${{ !inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=codebuddy2api
+          cache-to: type=gha,mode=max,scope=codebuddy2api
+
+      - name: Publish image summary
+        shell: bash
+        env:
+          PUSHED: ${{ inputs.push }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            if [[ "$PUSHED" == "true" ]]; then
+              echo "镜像已推送到 GHCR："
+            else
+              echo "dry-run 完成，镜像仅本地构建（未推送）："
+            fi
+            echo
+            echo '```'
+            printf '%s\n' "$IMAGE_TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
