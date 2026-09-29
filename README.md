@@ -95,7 +95,7 @@ $env:GATEWAY_PASSWORDLESS = "true"
 - `POST /v1/messages`
 - `GET /v1/models`
 - `GET /healthz`
-`/v1/models` 优先读取 CodeBuddy 实时模型目录，并缓存 5 分钟；上游不可用时回退到本地目录。常见旧模型名可通过 `gateway.model-alias` 映射到当前模型。
+`/v1/models` 优先读取本机 `codebuddy --help` 中 `--model` 声明的 CLI 目录（缓存 5 分钟）；CLI 不可用时读取 CodeBuddy `/v3/config` 实时目录（同样缓存 5 分钟），仍不可用时回退到本地目录。常见旧模型名可通过 `gateway.model-alias` 映射到当前模型。
 `/v1/messages/count_tokens` 默认使用本地估算。如需读取上游真实 usage，可设置 `gateway.count-tokens-mode: upstream`；该模式会发起一次最小生成请求，可能消耗上游额度。
 ### Codex 推荐配置
 

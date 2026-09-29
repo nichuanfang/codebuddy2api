@@ -8,6 +8,15 @@ gateway:
   stream-idle-timeout-seconds: 300
   # /v1/messages/count_tokens 默认本地估算；可改为 upstream 获取真实 usage。
   count-tokens-mode: "estimate"
+  # 可选：手工指定 /v1/models 返回的模型列表（顺序即返回顺序）。
+  # 留空/整段删除时，沿用本机 CodeBuddy CLI 目录、CodeBuddy 实时目录与网关内置兜底目录。
+  # 配置后此列表优先，用于 CLI/上游目录和本地兜底目录对不上时的场景。
+  # 支持两种写法：裸 model-id，或 {id, display-name}。
+  # models:
+  #   - hy4-preview-f
+  #   - hy3
+  #   - id: glm-5.3-flashx
+  #     display-name: GLM-5.3-FlashX
 system:
   db: sqlite
   # 0.0.0.0:8088 = 本机 + 局域网；127.0.0.1:8088 = 仅本机
