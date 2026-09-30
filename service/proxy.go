@@ -80,6 +80,9 @@ func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
 		if rawTools, err := json.Marshal(body["tools"]); err == nil {
 			global.CORE_LOG.Debug("chat tools sent upstream", zap.ByteString("tools", rawTools))
 		}
+		if rawMsgs, err := json.Marshal(body["messages"]); err == nil {
+			global.CORE_LOG.Debug("chat messages sent upstream", zap.ByteString("messages", rawMsgs))
+		}
 	}
 	sanitizeUpstreamChatWithMode(body, global.CORE_CONFIG.Gateway.SanitizeModeName())
 	encoded, err := json.Marshal(body)
