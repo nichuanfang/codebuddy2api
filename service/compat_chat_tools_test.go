@@ -152,3 +152,109 @@ func TestChatToolsNoToolsIsNoop(t *testing.T) {
 		t.Fatal("tools should not be added")
 	}
 }
+
+// OpenCat streams tool-call deltas as separate entries sharing one index; the
+// first carries id/name, the rest carry only argument fragments. This is the
+// exact shape captured in the user's debug log (2026-09-30 14:43), which the
+// upstream rejected with 11133.
+func TestChatMessagesMergeStreamedToolCallFragments(t *testing.T) {
+	meta, err := PrepareChatBody([]byte(`{"model":"deepseek-v4.1-flash","messages":[
+		{"role":"system","content":"Current Time: 2026-09-30"},
+		{"role":"user","content":"六安天气"},
+		{"role":"assistant","content":"","tool_calls":[
+			{"function":{"arguments":"","name":"WebSearch"},"id":"call_00_XAs4pLemr95bRlIuH9G52219","index":0,"type":"function"},
+			{"function":{"arguments":"{","name":""},"index":0},
+			{"function":{"arguments":"\"query\"","name":""},"index":0},
+			{"function":{"arguments":":","name":""},"index":0},
+			{"function":{"arguments":"\"六安天气\"","name":""},"index":0},
+			{"function":{"arguments":"}","name":""},"index":0}
+		]},
+		{"role":"tool","tool_call_id":"call_00_XAs4pLemr95bRlIuH9G52219","content":"sunny"}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	msgs := body["messages"].([]any)
+	if len(msgs) != 4 {
+		t.Fatalf("message count=%d", len(msgs))
+	}
+	calls := msgs[2].(map[string]any)["tool_calls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("tool call count=%d, want 1", len(calls))
+	}
+	call := calls[0].(map[string]any)
+	if call["id"] != "call_00_XAs4pLemr95bRlIuH9G52219" {
+		t.Fatalf("id=%v", call["id"])
+	}
+	fn := call["function"].(map[string]any)
+	if fn["name"] != "WebSearch" {
+		t.Fatalf("name=%v", fn["name"])
+	}
+	if fn["arguments"] != `{"query":"六安天气"}` {
+		t.Fatalf("arguments=%q", fn["arguments"])
+	}
+}
+
+// Orphan tool results (no tool_call_id) must be dropped: the OpenAI schema
+// requires tool_call_id and the upstream rejects messages without it.
+func TestChatMessagesDropOrphanToolResults(t *testing.T) {
+	meta, err := PrepareChatBody([]byte(`{"model":"deepseek-v4.1-flash","messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":"","tool_calls":[
+			{"function":{"arguments":"{}","name":"WebSearch"},"id":"call_1","index":0,"type":"function"}
+		]},
+		{"role":"tool","tool_call_id":"call_1","content":"ok"},
+		{"role":"tool","content":"orphan1"},
+		{"role":"tool","content":"orphan2"}
+	]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	msgs := body["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("message count=%d, want 3 (orphans dropped)", len(msgs))
+	}
+	for _, raw := range msgs {
+		message := raw.(map[string]any)
+		if message["role"] == "tool" && asString(message["tool_call_id"]) == "" {
+			t.Fatalf("orphan tool message survived: %v", message)
+		}
+	}
+}
+
+// Clean history must pass through unchanged (no regression).
+func TestChatMessagesLeavesCleanHistoryUntouched(t *testing.T) {
+	clean := `{"model":"deepseek-v4.1-flash","messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"WebSearch","arguments":"{\"query\":\"x\"}"}}]},
+		{"role":"tool","tool_call_id":"call_1","content":"ok"}
+	]}`
+	meta, err := PrepareChatBody([]byte(clean))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(meta.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	msgs := body["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("message count=%d", len(msgs))
+	}
+	calls := msgs[1].(map[string]any)["tool_calls"].([]any)
+	if len(calls) != 1 {
+		t.Fatalf("tool call count=%d", len(calls))
+	}
+	call := calls[0].(map[string]any)
+	if call["id"] != "call_1" || call["function"].(map[string]any)["arguments"] != `{"query":"x"}` {
+		t.Fatalf("call mutated: %v", call)
+	}
+}
