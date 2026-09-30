@@ -75,6 +75,7 @@ func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
 			body["reasoning_summary"] = "auto"
 		}
 	}
+	normalizeChatTools(body)
 	sanitizeUpstreamChatWithMode(body, global.CORE_CONFIG.Gateway.SanitizeModeName())
 	encoded, err := json.Marshal(body)
 	if err != nil {
