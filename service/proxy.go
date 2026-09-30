@@ -434,6 +434,9 @@ func (p *Proxy) relay(c *gin.Context, meta *ChatRequestMeta, path string) {
 		}
 		if resp.StatusCode != http.StatusOK {
 			raw, _ := io.ReadAll(resp.Body)
+			if global.CORE_LOG.Core().Enabled(zap.DebugLevel) {
+				global.CORE_LOG.Debug("upstream error body", zap.Int("upstream_status", resp.StatusCode), zap.String("error_body", string(clip(raw, 500))))
+			}
 			lastUpstreamStatus = resp.StatusCode
 			lastUpstreamRaw = append(lastUpstreamRaw[:0], raw...)
 			lastUpstreamRequestID = upstreamRequestID(resp)
