@@ -75,13 +75,14 @@ func PrepareChatBody(raw []byte) (*ChatRequestMeta, error) {
 			body["reasoning_summary"] = "auto"
 		}
 	}
+	repairChatMessages(body)
 	normalizeChatTools(body)
-	if global.CORE_LOG.Core().Enabled(zap.DebugLevel) {
+	if logger := global.CORE_LOG; logger != nil && logger.Core().Enabled(zap.DebugLevel) {
 		if rawTools, err := json.Marshal(body["tools"]); err == nil {
-			global.CORE_LOG.Debug("chat tools sent upstream", zap.ByteString("tools", rawTools))
+			logger.Debug("chat tools sent upstream", zap.ByteString("tools", rawTools))
 		}
 		if rawMsgs, err := json.Marshal(body["messages"]); err == nil {
-			global.CORE_LOG.Debug("chat messages sent upstream", zap.ByteString("messages", rawMsgs))
+			logger.Debug("chat messages sent upstream", zap.ByteString("messages", rawMsgs))
 		}
 	}
 	sanitizeUpstreamChatWithMode(body, global.CORE_CONFIG.Gateway.SanitizeModeName())
